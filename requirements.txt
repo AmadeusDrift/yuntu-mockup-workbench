@@ -1,0 +1,7 @@
+# Versions in the current portable Windows runtime/vendor environment.
+# These packages do not replace the runtime layout required by desktop/build.py.
+Pillow==12.3.0
+numpy==2.3.5
+psd-tools==1.26.0
+attrs==26.1.0
+typing_extensions==4.16.0

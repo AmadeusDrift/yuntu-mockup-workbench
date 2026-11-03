@@ -1,0 +1,18 @@
+# Local artwork, template state, caches and desktop builds
+/release/
+/.analysis-temp/
+/workbench/data/
+/通用PSD高速套图_正片叠底_2套并行便携版/
+**/__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.log
+*.psd
+*.psb
+Thumbs.db
+desktop.ini
