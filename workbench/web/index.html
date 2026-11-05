@@ -7,11 +7,12 @@
   <title>套图工作台</title>
   <link rel="stylesheet" href="/yuntu.css">
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/studio.css">
 </head>
 <body>
   <div id="app"><div class="loading" role="status">正在打开套图工作台…</div></div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <dialog id="image-dialog" aria-label="图片预览"><header><span id="image-title"></span><button type="button" class="icon" id="close-image" aria-label="关闭预览">✕</button></header><img id="large-image" alt="套图大图预览"></dialog>
+  <dialog id="image-dialog" aria-label="图片预览"><header><span id="image-title" aria-live="polite"></span><button type="button" class="icon" id="close-image" aria-label="关闭预览">✕</button></header><img id="large-image" alt="套图大图预览"><footer class="image-navigation"><button id="previous-image" type="button" aria-label="上一张预览图">← 上一张</button><small>键盘 ← → 切换 · Esc 关闭</small><button id="next-image" type="button" aria-label="下一张预览图">下一张 →</button></footer></dialog>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

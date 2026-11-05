@@ -19,7 +19,8 @@ from PIL import Image, ImageChops, ImageCms, ImageFilter, ImageOps
 VERSION = 4
 BATCH_WORKERS = 2
 EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.bmp'}
-MODES = {'auto', 'contain', 'cover', 'stretch'}
+MODES = {'auto', 'contain', 'cover', 'cover_bleed', 'stretch'}
+ORIENTATIONS = {'auto', 'original', 'cw90', 'ccw90', 'rotate180'}
 
 
 def safe_name(value):
@@ -72,9 +73,9 @@ def apply_opacity(image, opacity):
     return image
 
 
-def add_shadow(canvas, layer, shadow):
+def shadow_image(layer, shadow):
     if not shadow:
-        return canvas
+        return None
     alpha = layer.getchannel('A')
     spread = max(0, shadow.get('spread', 0))
     if spread:
@@ -86,9 +87,14 @@ def add_shadow(canvas, layer, shadow):
     alpha = alpha.transform(alpha.size, Image.Transform.AFFINE,
                             (1,0,-shadow['dx'],0,1,-shadow['dy']), Image.Resampling.BICUBIC)
     alpha = alpha.point(lambda n: round(n * shadow['opacity'] / 100))
-    ink = Image.new('RGBA', canvas.size, tuple(shadow['color']) + (0,))
+    ink = Image.new('RGBA', layer.size, tuple(shadow['color']) + (0,))
     ink.putalpha(alpha)
-    return Image.alpha_composite(canvas, ink)
+    return ink
+
+
+def add_shadow(canvas, layer, shadow):
+    ink = shadow_image(layer, shadow)
+    return Image.alpha_composite(canvas, ink) if ink is not None else canvas
 
 
 class Compiler:
@@ -110,7 +116,7 @@ class Compiler:
         if layer.kind=='artboard':
             raise ValueError(label+'：暂不支持画板文档，请在副本中整理为普通场景组')
         if layer.blend_mode not in (BlendMode.NORMAL, BlendMode.PASS_THROUGH, BlendMode.MULTIPLY,
-                                    BlendMode.SCREEN, BlendMode.SOFT_LIGHT):
+                                    BlendMode.SCREEN, BlendMode.SOFT_LIGHT, BlendMode.DARKEN):
             raise ValueError(label + '：暂不支持混合模式 ' + str(layer.blend_mode))
         if layer.fill_opacity != 255:
             raise ValueError(label + '：暂不支持非 100% 的填充不透明度')
@@ -131,7 +137,7 @@ class Compiler:
     def blend_name(layer):
         from psd_tools.constants import BlendMode
         return {BlendMode.MULTIPLY:'multiply', BlendMode.SCREEN:'screen',
-                BlendMode.SOFT_LIGHT:'soft_light'}.get(layer.blend_mode, 'normal')
+                BlendMode.SOFT_LIGHT:'soft_light', BlendMode.DARKEN:'darken'}.get(layer.blend_mode, 'normal')
 
     @staticmethod
     def check_clip_base(layer, label, blend_if):
@@ -408,7 +414,7 @@ class Compiler:
                     flush()
                     clip_stack={'kind':'clipstack','base':self.asset(full),'ops':[],'shadow':shadow}
                     ops.append(clip_stack)
-                elif layer.blend_mode in (BlendMode.MULTIPLY,BlendMode.SCREEN,BlendMode.SOFT_LIGHT) or blend_if:
+                elif layer.blend_mode in (BlendMode.MULTIPLY,BlendMode.SCREEN,BlendMode.SOFT_LIGHT,BlendMode.DARKEN) or blend_if:
                     flush()
                     if shadow:
                         ink=add_shadow(Image.new('RGBA',size),full,shadow)
@@ -505,7 +511,7 @@ def load_image(path,preserve_alpha=False):
         return rgb
 
 
-def auto_fit_info(im,size):
+def auto_fit_info(im,size,policy=2):
     """Explain geometric placement for one artwork and one native print area."""
     alpha=im.getchannel('A') if im.mode=='RGBA' else im.convert('RGBA').getchannel('A')
     bounds=alpha.getbbox()
@@ -514,17 +520,132 @@ def auto_fit_info(im,size):
     source_size=(bounds[2]-bounds[0],bounds[3]-bounds[1]) if has_alpha else im.size
     ratio=(source_size[0]/source_size[1])/(size[0]/size[1])
     retained=min(ratio,1/ratio)
-    mode='contain' if has_alpha or retained<0.92 else 'cover'
-    reason=('透明图：去除外围透明留白，等比完整放入印区' if has_alpha else
-            '比例接近：居中铺满，裁切不超过 8%' if mode=='cover' else
-            '比例差异较大：等比完整保留画面')
+    if policy==1:
+        mode='contain' if has_alpha or retained<0.92 else 'cover'
+        reason=('透明图：去除外围透明留白，等比完整放入印区' if has_alpha else
+                '比例接近：居中铺满，裁切不超过 8%' if mode=='cover' else
+                '比例差异较大：等比完整保留画面')
+    else:
+        histogram=alpha.crop(bounds).histogram() if has_alpha else None
+        rectangular=not has_alpha or sum(histogram[250:])/((bounds[2]-bounds[0])*(bounds[3]-bounds[1]))>=.98
+        mode='cover' if rectangular else 'contain'
+        reason=('满版图：等比铺满印区，比例不同时居中裁切' if rectangular else
+                '透明图案：去除外围透明留白，等比完整放入印区')
     return dict(mode=mode,reason=reason,has_alpha=has_alpha,retained_fraction=retained,
                 bounds=list(bounds) if has_alpha else None)
 
 
-def fit_image(im,size,mode,preserve_alpha=False):
+def prepare_cover_artwork(im):
+    """V7 semantics: trim transparent margins and near-neutral white outer padding."""
+    im=im.convert('RGBA') if im.mode!='RGBA' else im
+    bounds=im.getchannel('A').getbbox()
+    if bounds is None:raise ValueError('印花图片完全透明，没有可放置的内容')
+    if bounds!=(0,0,*im.size):im=im.crop(bounds)
+    corner=im.getpixel((0,0))
+    if corner[3]<250 or min(corner[:3])<250 or max(corner[:3])-min(corner[:3])>2:return im
+    left,top,right,bottom=im.width,im.height,0,0
+    # Limit scratch buffers even for large source images; never turn white pixels transparent.
+    for y in range(0,im.height,256):
+        tile=np.asarray(im.crop((0,y,im.width,min(y+256,im.height))))
+        rgb=tile[:,:,:3];low=rgb.min(axis=2);high=rgb.max(axis=2)
+        content=(low<250)|((high-low)>2)|(tile[:,:,3]<250)
+        rows=np.flatnonzero(content.any(axis=1));cols=np.flatnonzero(content.any(axis=0))
+        if rows.size:
+            top=min(top,y+int(rows[0]));bottom=max(bottom,y+int(rows[-1])+1)
+            left=min(left,int(cols[0]));right=max(right,int(cols[-1])+1)
+    if right>left and bottom>top and (left,top,right,bottom)!=(0,0,*im.size):return im.crop((left,top,right,bottom))
+    return im
+
+
+def cover_with_bleed(im,size):
+    scale=max(size[0]/im.width,size[1]/im.height)*1.01
+    width=max(size[0],math.ceil(im.width*scale));height=max(size[1],math.ceil(im.height*scale))
+    left=(width-size[0])//2;top=(height-size[1])//2
+    # Sample the centered crop directly; extreme panoramas must not allocate
+    # a giant intermediate merely to discard almost all of it afterward.
+    box=(left*im.width/width,top*im.height/height,
+         (left+size[0])*im.width/width,(top+size[1])*im.height/height)
+    return im.resize(size,Image.Resampling.BICUBIC,box=box)
+
+
+def artwork_content_size(im):
+    alpha=im.getchannel('A') if im.mode=='RGBA' else im.convert('RGBA').getchannel('A')
+    bounds=alpha.getbbox()
+    if bounds is None:raise ValueError('印花图片完全透明，没有可放置的内容')
+    return bounds[2]-bounds[0],bounds[3]-bounds[1]
+
+
+def rotation_for_size(source_size,target_size,orientation):
+    if orientation not in ORIENTATIONS:raise ValueError('印花方向设置无效')
+    if orientation!='auto':return {'original':0,'cw90':90,'ccw90':270,'rotate180':180}[orientation]
+    source_ratio=source_size[0]/source_size[1];target_ratio=target_size[0]/target_size[1]
+    # Near-square images/print areas have no reliable horizontal/vertical choice.
+    opposite=(source_ratio>1.1 and target_ratio<1/1.1) or (source_ratio<1/1.1 and target_ratio>1.1)
+    return 90 if opposite else 0
+
+
+def combined_rotation(base,rotation):
+    if isinstance(rotation,bool) or not isinstance(rotation,(int,float)) or not math.isfinite(rotation) or not -180<=rotation<=180:
+        raise ValueError('印花角度请填写 -180～180 度的数字')
+    angle=(base+rotation)%360
+    return int(angle) if angle==int(angle) else angle
+
+
+def orientation_info(im,size,orientation,rotation=0):
+    source_size=artwork_content_size(im) if orientation=='auto' else im.size
+    angle=combined_rotation(rotation_for_size(source_size,size,orientation),rotation)
+    reason=(f'顺时针旋转{angle:g}°后适配' if 0<angle<=180 else f'逆时针旋转{360-angle:g}°后适配' if angle>180 else
+            '横竖方向匹配，保持原方向' if orientation=='auto' and rotation==0 else '保持原方向')
+    return dict(rotation=angle,reason=reason)
+
+
+def rotate_artwork(im,angle):
+    return im if angle==0 else im.transpose({90:Image.Transpose.ROTATE_270,270:Image.Transpose.ROTATE_90,180:Image.Transpose.ROTATE_180}[angle])
+
+
+def fit_rotated_artwork(im,size,mode,angle,preserve_alpha=False,policy=2):
+    """Rotate inside the native print plane; its outer geometry never changes."""
     if mode=='auto':
-        info=auto_fit_info(im,size)
+        info=auto_fit_info(im,size,policy=policy)
+        if info['has_alpha']:im=im.crop(info['bounds'])
+        mode=info['mode'];preserve_alpha=True
+    radians=math.radians(angle);c=math.cos(radians);s=math.sin(radians)
+    w,h=im.size;tw,th=size
+    if mode in ('cover','cover_bleed'):
+        scale=max((abs(c)*tw+abs(s)*th)/w,(abs(s)*tw+abs(c)*th)/h)
+        if mode=='cover_bleed':scale*=1.01
+        sx=sy=scale
+    elif mode=='contain':
+        sx=sy=min(tw/(abs(c)*w+abs(s)*h),th/(abs(s)*w+abs(c)*h))
+    elif mode=='stretch':
+        sx=tw/(abs(c)*w+abs(s)*h);sy=th/(abs(s)*w+abs(c)*h)
+    else:raise ValueError('适配方式无效')
+    a,b=c/sx,s/sy;d,e=-s/sx,c/sy
+    matrix=(a,b,w/2-a*tw/2-b*th/2,d,e,h/2-d*tw/2-e*th/2)
+    image=im if im.mode=='RGBA' else im.convert('RGBA')
+    # AFFINE/BICUBIC samples a small fixed neighbourhood, so a large original
+    # must be low-pass filtered before shrinking or fine details produce moire.
+    # This intermediate only shrinks; keep the exact center via row scaling.
+    # Row lengths of the inverse transform give the source-pixel footprint on
+    # each source axis, including rotated, unequal stretch factors.
+    reduction_x=min(1,1/math.hypot(a,b));reduction_y=min(1,1/math.hypot(d,e))
+    if reduction_x<1 or reduction_y<1:
+        reduced=(max(1,math.ceil(w*reduction_x)),max(1,math.ceil(h*reduction_y)))
+        image=image.resize(reduced,Image.Resampling.LANCZOS)
+        rx,ry=reduced[0]/w,reduced[1]/h
+        matrix=tuple(value*(rx if index<3 else ry) for index,value in enumerate(matrix))
+    fill=(255,255,255,255) if mode=='contain' and not preserve_alpha else (0,0,0,0)
+    return image.transform(size,Image.Transform.AFFINE,matrix,Image.Resampling.BICUBIC,fillcolor=fill)
+
+
+def fit_image(im,size,mode,preserve_alpha=False,policy=2,orientation='original',rotation=0):
+    if mode=='cover_bleed':im=prepare_cover_artwork(im)
+    angle=orientation_info(im,size,orientation,rotation=rotation)['rotation'] if orientation!='original' or rotation else 0
+    if angle not in (0,90,180,270):return fit_rotated_artwork(im,size,mode,angle,preserve_alpha=preserve_alpha,policy=policy)
+    if angle:im=rotate_artwork(im,angle)
+    if mode=='cover_bleed':return cover_with_bleed(im,size)
+    if mode=='auto':
+        info=auto_fit_info(im,size,policy=policy)
         if info['has_alpha']:im=im.crop(info['bounds'])
         mode=info['mode']
         preserve_alpha=True
@@ -546,49 +667,90 @@ class Renderer:
         self.warp_maps={}
         self._fixed_images={}
         self._fixed_settings=None
+        self._static_layers={}
         def walk(ops):
             for op in ops:
                 for key in ('asset','mask','base'):
-                    if op.get(key):
+                    if op.get(key) and op[key] not in self.assets:
                         file=(self.path.parent/op[key]).resolve()
                         if file.parent!=self.path.parent.resolve():raise ValueError('模板素材路径无效')
                         with Image.open(file) as im:self.assets[op[key]]=im.copy()
                 if op['kind'] in ('group','clipstack'):walk(op['ops'])
                 if op.get('base_op'):walk([op['base_op']])
                 if op['kind']=='slot':op['coeff']=coefficients(op['quad'],op['native_size'])
-                if op.get('warp'):
+                if op.get('warp') and op['warp'] not in self.warp_maps:
                     from quilt_warp import load_map
                     file=(self.path.parent/op['warp']).resolve()
                     if file.parent!=self.path.parent.resolve():raise ValueError('网格素材路径无效')
                     self.warp_maps[op['warp']]=load_map(file)
+                if op['kind']=='static':
+                    layer=self.assets[op['asset']]
+                    if op.get('mask'):
+                        layer=layer.copy();layer.putalpha(ImageChops.multiply(layer.getchannel('A'),self.assets[op['mask']]))
+                    shadow=op.get('shadow')
+                    if shadow:shadow=dict(shadow,opacity=shadow['opacity']*op.get('opacity',255)/255)
+                    self._static_layers[id(op)]=(apply_opacity(layer,op.get('opacity',255)),shadow_image(layer,shadow))
         for scene in self.data['scenes']:walk(scene['ops'])
 
-    def render_scene(self,scene,artwork,mode,prepared):
+    def render_scene(self,scene,artwork,mode,prepared,fit_policy=2,orientation='original',rotation=0):
         size=(scene['width'],scene['height'])
-        def compose(ops,initial=None):
+        def compose(ops,initial=None,region=None):
             from blend_modes import composite_rgba
-            canvas=initial.copy() if initial is not None else Image.new('RGBA',size)
+            local_size=(region[2]-region[0],region[3]-region[1]) if region else size
+            canvas=initial.copy() if initial is not None else Image.new('RGBA',local_size)
             for op in ops:
                 if op['kind']=='adjustment':
                     from tone_adjustments import apply_lut_rgba
+                    mask=self.assets[op['mask']] if op.get('mask') else None
+                    if mask is not None and region:mask=mask.crop(region)
                     canvas=apply_lut_rgba(canvas,op['lut'],
-                        mask=self.assets[op['mask']] if op.get('mask') else None,opacity=op.get('opacity',255))
+                        mask=mask,opacity=op.get('opacity',255))
                     continue
-                elif op['kind']=='static':layer=self.assets[op['asset']]
+                elif op['kind']=='static':
+                    layer=self._static_layers[id(op)][0]
+                    if region:layer=layer.crop(region)
                 elif op['kind']=='group':layer=compose(op['ops'])
                 elif op['kind']=='clipstack':
                     base=compose([op['base_op']]) if op.get('base_op') else self.assets[op['base']].convert('RGBA')
-                    plane=base.copy();plane.putalpha(255)
-                    if self.data['version']<=3 and not op.get('base_op'):
-                        # Preserve the original 8-bit rounding of existing caches.
-                        layer=Image.alpha_composite(plane,compose(op['ops']))
+                    bounds=base.getchannel('A').getbbox()
+                    # Pixel-local clipped effects cannot affect the final image
+                    # outside their base coverage. Unknown/nonlocal effects and
+                    # legacy rounding paths keep the full-canvas implementation.
+                    local=(self.data['version']>=4 and bounds is not None and bounds!=(0,0,*size)
+                           and all(child['kind'] in ('static','adjustment') and not child.get('shadow') for child in op['ops']))
+                    if local:
+                        plane=base.crop(bounds);plane.putalpha(255)
+                        patch=compose(op['ops'],initial=plane,region=bounds)
+                        patch.putalpha(base.getchannel('A').crop(bounds))
+                        layer=Image.new('RGBA',size);layer.paste(patch,bounds)
                     else:
-                        layer=compose(op['ops'],initial=plane)
-                    layer.putalpha(base.getchannel('A'))
+                        plane=base.copy();plane.putalpha(255)
+                        if self.data['version']<=3 and not op.get('base_op'):
+                            # Preserve the original 8-bit rounding of existing caches.
+                            layer=Image.alpha_composite(plane,compose(op['ops']))
+                        else:
+                            layer=compose(op['ops'],initial=plane)
+                        layer.putalpha(base.getchannel('A'))
                 elif op['kind']=='slot':
                     stage_size=tuple(op['native_size'])
-                    if stage_size not in prepared:prepared[stage_size]=fit_image(artwork,stage_size,mode,
-                                                                              preserve_alpha=bool(self.data.get('workbench')))
+                    if stage_size not in prepared:
+                        working=artwork
+                        if mode=='cover_bleed':
+                            if 'cover_artwork' not in prepared:prepared['cover_artwork']=prepare_cover_artwork(artwork)
+                            working=prepared['cover_artwork']
+                        angle=0
+                        if orientation!='original' or rotation:
+                            geometry=('orientation_size',id(working))
+                            if geometry not in prepared:prepared[geometry]=artwork_content_size(working) if orientation=='auto' else working.size
+                            angle=combined_rotation(rotation_for_size(prepared[geometry],stage_size,orientation),rotation)
+                            if angle in (0,90,180,270):
+                                rotated=('orientation_image',id(working),angle)
+                                if rotated not in prepared:prepared[rotated]=rotate_artwork(working,angle)
+                                working=prepared[rotated]
+                        if angle not in (0,90,180,270):prepared[stage_size]=fit_rotated_artwork(working,stage_size,mode,angle,preserve_alpha=bool(self.data.get('workbench')),policy=fit_policy)
+                        elif mode=='cover_bleed':prepared[stage_size]=cover_with_bleed(working,stage_size)
+                        else:prepared[stage_size]=fit_image(working,stage_size,mode,
+                            preserve_alpha=bool(self.data.get('workbench')),policy=fit_policy)
                     if op.get('warp'):
                         from quilt_warp import render_rgba
                         layer=render_rgba(prepared[stage_size],self.warp_maps[op['warp']])
@@ -596,12 +758,16 @@ class Renderer:
                     else:
                         layer=prepared[stage_size].transform(size,Image.Transform.PERSPECTIVE,op['coeff'],Image.Resampling.BICUBIC)
                 else:raise ValueError('未知模板步骤')
-                if op.get('mask'):
-                    layer=layer.copy();layer.putalpha(ImageChops.multiply(layer.getchannel('A'),self.assets[op['mask']]))
-                if op.get('shadow'):
-                    shadow=dict(op['shadow'],opacity=op['shadow']['opacity']*op.get('opacity',255)/255)
-                    canvas=add_shadow(canvas,layer,shadow)
-                layer=apply_opacity(layer,op.get('opacity',255))
+                if op['kind']=='static':
+                    ink=self._static_layers[id(op)][1]
+                    if ink is not None:canvas=Image.alpha_composite(canvas,ink)
+                else:
+                    if op.get('mask'):
+                        layer.putalpha(ImageChops.multiply(layer.getchannel('A'),self.assets[op['mask']]))
+                    if op.get('shadow'):
+                        shadow=dict(op['shadow'],opacity=op['shadow']['opacity']*op.get('opacity',255)/255)
+                        canvas=add_shadow(canvas,layer,shadow)
+                    layer=apply_opacity(layer,op.get('opacity',255))
                 if op.get('blend_if'):
                     from blend_if import apply_blend_if
                     layer=apply_blend_if(canvas,layer,op['blend_if'])
@@ -610,7 +776,7 @@ class Renderer:
         return compose(scene['ops'])
 
     def render(self,path,settings):
-        artwork=load_image(path,preserve_alpha=settings['fit']=='auto');prepared={}
+        artwork=load_image(path,preserve_alpha=settings['fit'] in ('auto','cover_bleed'));prepared={}
         if settings.get('trim') and settings['fit']!='auto':
             bounds=artwork.getchannel('A').getbbox()
             if bounds:artwork=artwork.crop(bounds)
@@ -623,7 +789,7 @@ class Renderer:
             if fixed and scene_index in self._fixed_images:
                 yield scene['name'],self._fixed_images[scene_index].copy()
                 continue
-            im=self.render_scene(scene,artwork,settings['fit'],prepared)
+            im=self.render_scene(scene,artwork,settings['fit'],prepared,fit_policy=settings.get('fit_policy',1),orientation=settings.get('orientation','original'),rotation=settings.get('rotation',0))
             target=(settings['width'],settings['height'])
             if target!=(0,0):
                 fitted=ImageOps.contain(im,target,Image.Resampling.BICUBIC)
@@ -631,7 +797,10 @@ class Renderer:
                 output.paste(fitted,((target[0]-fitted.width)//2,(target[1]-fitted.height)//2))
                 im=output
             if settings['format']=='jpg':
-                white=Image.new('RGB',im.size,'white');white.paste(im,mask=im.getchannel('A'));im=white
+                alpha=im.getchannel('A')
+                if alpha.getextrema()==(255,255):im=im.convert('RGB')
+                else:
+                    white=Image.new('RGB',im.size,'white');white.paste(im,mask=alpha);im=white
             if fixed:self._fixed_images[scene_index]=im.copy()
             yield scene['name'],im
 
@@ -643,6 +812,12 @@ def settings_checked(settings):
         raise ValueError('输出尺寸：两项都填 0 表示沿用 PSD，或填写 16～8192 的像素尺寸（不超过 3200 万像素）')
     if not 1<=s['ppi']<=2400 or not 1<=s['quality']<=100:raise ValueError('PPI 范围 1～2400；JPG 质量范围 1～100')
     if s['fit'] not in MODES or s['format'] not in ('jpg','png'):raise ValueError('输出设置无效')
+    if 'orientation' in s and s['orientation'] not in ORIENTATIONS:raise ValueError('印花方向设置无效')
+    if 'rotation' in s:combined_rotation(0,s['rotation'])
+    if 'fit_policy' in s and (isinstance(s['fit_policy'],bool) or s['fit_policy'] not in (1,2)):raise ValueError('图片适配版本无效')
+    if 'naming' in s:
+        from export_naming import checked_naming
+        s['naming']=checked_naming(s['naming'],safe_name)
     return s
 
 

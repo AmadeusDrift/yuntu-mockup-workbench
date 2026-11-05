@@ -14,7 +14,8 @@ import catalog
 from cache import DiskCache
 
 DEFAULTS = {'input': '', 'output': '', 'settings': {'width': 0, 'height': 0,
-            'ppi': 72, 'quality': 100, 'fit': 'auto', 'format': 'jpg', 'trim': False},
+            'ppi': 72, 'quality': 100, 'fit': 'auto', 'format': 'jpg', 'trim': False, 'fit_policy': 2, 'orientation': 'auto', 'rotation': 0,
+            'naming': {'folder': '{name}', 'image': '{scene:02}', 'start': 1}},
             'limit': 0, 'preferences_version': 2}
 
 
@@ -143,6 +144,8 @@ class Service:
                                 previous = by_id.get(scene['id'])
                                 if previous:
                                     scene.update(mode=previous['mode'], targets=previous['targets'])
+                            order = {scene['id']: index for index, scene in enumerate(old['scenes'])}
+                            item['scenes'].sort(key=lambda scene: order.get(scene['id'], len(order)))
                         self.templates = [t for t in self.templates if t['id'] != item['id']] + [item]
                         self.save('templates.json', self.templates)
                 except Exception as exc:
@@ -274,12 +277,17 @@ class Service:
                         if op.get('base_op'):collect([op['base_op']])
                 for scene in renderer.data['scenes']:
                     if not scene.get('fixed'):collect(scene['ops'])
-                if settings['fit']=='auto' and native_sizes:
+                if native_sizes and (settings['fit']=='auto' or 'orientation' in settings):
                     artwork=engine.load_image(source,preserve_alpha=True)
                     try:
+                        direction_source=engine.prepare_cover_artwork(artwork) if settings['fit']=='cover_bleed' else artwork
+                        turned={0:direction_source}
                         for size in sorted(native_sizes):
-                            info=engine.auto_fit_info(artwork,size)
-                            fit_info.append(dict(size=list(size),mode=info['mode'],reason=info['reason']))
+                            direction=engine.orientation_info(direction_source,size,settings.get('orientation','original'),rotation=settings.get('rotation',0))
+                            angle=direction['rotation']
+                            if angle in (0,90,180,270) and angle not in turned:turned[angle]=engine.rotate_artwork(direction_source,angle)
+                            info=engine.auto_fit_info(turned.get(angle,direction_source),size,policy=settings.get('fit_policy',1)) if settings['fit']=='auto' else dict(mode=settings['fit'],reason={'contain':'等比完整放入','cover':'等比铺满、居中裁切','cover_bleed':'去白边后等比铺满','stretch':'拉伸填满'}[settings['fit']])
+                            fit_info.append(dict(size=list(size),mode=info['mode'],rotation=angle,reason=direction['reason']+'；'+info['reason']))
                     finally:artwork.close()
                 destination = self.root / 'previews' / uuid.uuid4().hex
                 destination.mkdir()

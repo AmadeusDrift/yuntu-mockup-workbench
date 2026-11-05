@@ -75,7 +75,7 @@ function seedData() {
       if(fs.existsSync(source)&&!fs.existsSync(target))fs.cpSync(source,target,{recursive:true});
     }
   }
-  fs.writeFileSync(marker,JSON.stringify({version:'0.2.0'}));
+  fs.writeFileSync(marker,JSON.stringify({version:app.getVersion()}));
 }
 
 function launchBackend() {
@@ -110,12 +110,14 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance',()=>{if(window){if(window.isMinimized())window.restore();window.show();window.focus()}});
   app.whenReady().then(async()=>{
+    if(fs.existsSync(path.join(path.dirname(app.getPath('exe')),'.workbench-update.json')))throw new Error('上次更新尚未完成。请关闭软件，重新运行安装包，恢复完成后再打开。');
     seedData();Menu.setApplicationMenu(null);
     const area=screen.getPrimaryDisplay().workAreaSize;
     window=new BrowserWindow({width:Math.min(1520,area.width),height:Math.min(960,area.height),minWidth:1060,minHeight:700,
-      title:'套图工作台',show:false,backgroundColor:'#f3f8fe',icon:path.join(__dirname,'app.ico'),
+      title:'套图工作台 v'+app.getVersion(),show:false,backgroundColor:'#f3f8fe',icon:path.join(__dirname,'app.ico'),
       webPreferences:{preload:path.join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true}});
     window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+    window.on('page-title-updated',event=>event.preventDefault());
     window.webContents.session.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
     window.webContents.on('will-navigate',(event,url)=>{if(url!==origin+'/')event.preventDefault()});
     window.on('close',event=>{

@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bootstrap
 from PIL import Image, ImageDraw
 
-VERSION = '0.2.0'
+VERSION = json.loads((Path(__file__).parent / 'package.json').read_text(encoding='utf-8'))['version']
 project = bootstrap.ROOT.parent
 release = project / 'release'
 stage = release / ('套图工作台-v' + VERSION)
@@ -45,7 +45,7 @@ def build_portable():
                     raise ValueError('运行环境压缩包路径无效')
             package.extractall(stage)
     app_root.mkdir(parents=True, exist_ok=True)
-    for name in ('main.cjs','preload.cjs','package.json'):
+    for name in ('main.cjs','preload.cjs','package.json','installer_helper.py'):
         shutil.copyfile(Path(__file__).parent/name,app_root/name)
     print('Copying bundled Python and PSD engine...', flush=True)
     for name in ('runtime', 'vendor'):
@@ -59,8 +59,8 @@ def build_portable():
     for name in ('core','web'):
         shutil.copytree(bootstrap.ROOT/name,server/name,dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     seed=app_root/'seed';seed.mkdir(exist_ok=True)
-    shutil.copyfile(bootstrap.ROOT/'data/templates.json',seed/'templates.json')
-    shutil.copytree(bootstrap.ROOT/'data/thumbs',seed/'thumbs',dirs_exist_ok=True)
+    # A transferable build must not reference PSDs on the build machine.
+    (seed/'templates.json').write_text('[]\n',encoding='utf-8')
     shutil.copyfile(project/'使用套图工作台.md',app_root/'使用说明.md')
     shutil.copyfile(bootstrap.ROOT/'SOURCE.md',app_root/'SOURCE.md')
     icon(app_root/'app.ico')
@@ -72,6 +72,10 @@ def build_portable():
     if wer.exists():
         wer.rename(stage/'套图工作台_wer.dll')
     (stage/'请先看这里.txt').write_text('双击“套图工作台.exe”即可。无需安装Python、Photoshop或打开浏览器。\n整个文件夹需要一起保留。模板和批次设置保存在个人应用数据目录，原PSD和印花不会修改。\n',encoding='utf-8-sig')
+    inventory=app_root/'install-manifest.json'
+    inventory.write_text(json.dumps({'product':'yuntu-mockup-workbench','version':VERSION,'files':[
+        {'path':p.relative_to(stage).as_posix(),'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+        for p in sorted(stage.rglob('*')) if p.is_file() and p!=inventory]},ensure_ascii=False),encoding='utf-8')
     manifest={'version':VERSION,'electron':'45.1.0','files':sum(p.is_file() for p in stage.rglob('*')),
               'bytes':sum(p.stat().st_size for p in stage.rglob('*') if p.is_file()),
               'source_sha256':{str(p.relative_to(bootstrap.ROOT)):hashlib.sha256(p.read_bytes()).hexdigest()
@@ -87,23 +91,49 @@ def build_installer():
     source=release/'installer.nsi'
     def quote(value):return str(value).replace('$','$$').replace('"','$\\"')
     lines=[
-        'Unicode true', 'Name "套图工作台"', f'OutFile "{quote(installer)}"',
+        'Unicode true', f'Name "套图工作台 {VERSION}"', f'OutFile "{quote(installer)}"',
         'InstallDir "$LOCALAPPDATA\\Programs\\YuntuMockupWorkbench"','RequestExecutionLevel user',
-        'SetCompressor zlib','!include "MUI2.nsh"',
+        'InstallDirRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "UninstallString"',
+        'SetCompressor zlib','!include "MUI2.nsh"','!include "FileFunc.nsh"',
+        'AllowSkipFiles off','Var ExtractOnly','Var NoRegister','Var CloseArgument','Var ResultMessage',
+        'Function .onInit','${GetParameters} $0','ClearErrors',
+        '${GetOptions} $0 "/EXTRACTONLY" $1','IfErrors normal_install',
+        'StrCpy $ExtractOnly "1"','normal_install:','ClearErrors',
+        '${GetOptions} $0 "/NOREGISTER" $1','IfErrors options_done','StrCpy $NoRegister "1"','options_done:','FunctionEnd',
         f'!define MUI_ICON "{quote(app_root/"app.ico")}"',
+        '!define MUI_WELCOMEPAGE_TEXT "安装或更新套图工作台。已有模板、设置和批次记录会保留；更新前会备份设置。请勿在更新过程中启动软件。"',
         '!insertmacro MUI_PAGE_WELCOME','!insertmacro MUI_PAGE_DIRECTORY','!insertmacro MUI_PAGE_INSTFILES',
         '!define MUI_FINISHPAGE_RUN "$INSTDIR\\套图工作台.exe"','!insertmacro MUI_PAGE_FINISH',
         '!insertmacro MUI_UNPAGE_CONFIRM','!insertmacro MUI_UNPAGE_INSTFILES','!insertmacro MUI_LANGUAGE "SimpChinese"',
-        'Section "安装"','SetShellVarContext current','SetOutPath "$INSTDIR"',f'File /r "{quote(stage)}\\*"',
+        'Section "安装"','SetShellVarContext current','InitPluginsDir','SetOutPath "$PLUGINSDIR\\payload"',f'File /r "{quote(stage)}\\*"',
+        'StrCmp $ExtractOnly "1" extract_only',
+        'DetailPrint "正在检查已有版本和运行状态…"',
+        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$APPDATA\\套图工作台" --result "$PLUGINSDIR\\update-result.ini" --action check\'',
+        'Pop $0','StrCmp $0 "0" apply_update','StrCmp $0 "20" close_running update_failed',
+        'close_running:','IfSilent update_failed',
+        'MessageBox MB_OKCANCEL|MB_ICONINFORMATION "检测到套图工作台正在运行。点击确定，将保存套图进度并关闭软件，然后继续更新。" IDOK allow_close',
+        'SetErrorLevel 20','Abort','allow_close:','StrCpy $CloseArgument "--close-running"',
+        'apply_update:','DetailPrint "正在备份设置并更新程序，请稍候…"','Delete "$PLUGINSDIR\\update-result.ini"',
+        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$APPDATA\\套图工作台" --result "$PLUGINSDIR\\update-result.ini" --action install $CloseArgument\'',
+        'Pop $0','StrCmp $0 "0" register_install update_failed',
+        'extract_only:',
+        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$APPDATA\\套图工作台" --result "$PLUGINSDIR\\update-result.ini" --action extract\'',
+        'Pop $0','StrCmp $0 "0" install_done update_failed',
+        'register_install:','StrCmp $NoRegister "1" install_done','SetOutPath "$INSTDIR"',
         'WriteUninstaller "$INSTDIR\\卸载套图工作台.exe"',
         'CreateDirectory "$SMPROGRAMS\\套图工作台"',
         'CreateShortcut "$DESKTOP\\套图工作台.lnk" "$INSTDIR\\套图工作台.exe" "" "$INSTDIR\\resources\\app\\app.ico"',
         'CreateShortcut "$SMPROGRAMS\\套图工作台\\套图工作台.lnk" "$INSTDIR\\套图工作台.exe" "" "$INSTDIR\\resources\\app\\app.ico"',
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DisplayName" "套图工作台"',
         f'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DisplayVersion" "{VERSION}"',
+        'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "InstallLocation" "$INSTDIR"',
+        'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DataLocation" "$APPDATA\\套图工作台"',
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "UninstallString" \'"$INSTDIR\\卸载套图工作台.exe"\'',
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DisplayIcon" "$INSTDIR\\resources\\app\\app.ico"',
-        'SectionEnd','Section "Uninstall"','SetShellVarContext current']
+        'Goto install_done','update_failed:','ReadINIStr $ResultMessage "$PLUGINSDIR\\update-result.ini" "update" "message"',
+        'StrCmp $ResultMessage "" 0 error_message_ready','StrCpy $ResultMessage "安装未完成，旧版未被覆盖或恢复记录已保留。请关闭软件后重新运行安装包。"',
+        'error_message_ready:','DetailPrint "$ResultMessage"','IfSilent +2','MessageBox MB_OK|MB_ICONSTOP "$ResultMessage"',
+        'SetErrorLevel 10','Abort','install_done:','SectionEnd','Section "Uninstall"','SetShellVarContext current']
     # Delete only installed files, never recursively remove a user-selected directory.
     for entry in stage.rglob('*'):
         if entry.is_file():lines.append('Delete "$INSTDIR\\'+quote(entry.relative_to(stage))+'"')

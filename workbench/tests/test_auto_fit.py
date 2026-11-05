@@ -25,14 +25,15 @@ class AutoFitTests(unittest.TestCase):
         self.assertEqual(info['mode'], 'contain')
         self.assertTrue(info['has_alpha'])
 
-    def test_opaque_uses_cover_only_with_at_least_92_percent_retained(self):
+    def test_full_artwork_covers_and_legacy_policy_retains_prior_placement(self):
         art = Image.new('RGBA', (100, 100), 'red')
         near = engine.auto_fit_info(art, (100, 95))
         wide = engine.auto_fit_info(art, (200, 100))
         self.assertEqual(near['mode'], 'cover')
         self.assertAlmostEqual(near['retained_fraction'], .95)
-        self.assertEqual(wide['mode'], 'contain')
-        self.assertEqual(engine.fit_image(art, (200, 100), 'auto').getbbox(), (50, 0, 150, 100))
+        self.assertEqual(wide['mode'], 'cover')
+        self.assertEqual(engine.fit_image(art, (200, 100), 'auto').getbbox(), (0, 0, 200, 100))
+        self.assertEqual(engine.fit_image(art, (200, 100), 'auto', policy=1).getbbox(), (50, 0, 150, 100))
 
     def test_entirely_transparent_artwork_reports_clear_error(self):
         with self.assertRaisesRegex(ValueError, '完全透明'):

@@ -111,10 +111,10 @@ def copy_validated(file,target):
     if size!=file['bytes'] or digest.hexdigest()!=file['sha256'] or target.stat().st_size!=size:
         raise ValueError('缓存或写入校验失败，未发布这一套结果。')
 
-def publish_product(prepared,dest,source_name,record_before,journal,state,safe_name):
+def publish_product(prepared,dest,source_name,record_before,journal,state,safe_name,naming=None):
     """Upload a complete local set; atomically expose a new SKU directory."""
-    stem=safe_name(Path(source_name).stem);product=dest/stem
-    names=[f'{stem}_{file["index"]:02d}.{prepared["format"]}' for file in prepared['files']]
+    stem=naming['folder'] if naming else safe_name(Path(source_name).stem);product=dest/stem
+    names=naming['files'] if naming else [f'{stem}_{file["index"]:02d}.{prepared["format"]}' for file in prepared['files']]
     if product.exists():
         if not product.is_dir() or product.is_symlink() or (hasattr(product,'is_junction') and product.is_junction()):
             raise ValueError('已有产品输出路径类型无效，未覆盖。')
@@ -219,19 +219,16 @@ def run_batch(api,manifest,input_folder,output_folder,settings,limit=0,resume=No
     source=Path(input_folder).resolve()
     files=input_snapshot(source,api.EXTENSIONS,limit)
     if not files: raise ValueError('输入文件夹中没有支持的图片；不读取子文件夹')
-    names={}
-    for path,_,_ in files:
-        key=api.safe_name(path.stem).casefold()
-        if key in names: raise ValueError('发现重名产品：'+names[key]+' / '+path.name+'，请先调整文件名')
-        names[key]=path.name
+    from export_naming import plan_outputs
+    plans=plan_outputs(files,len(json.loads(Path(manifest).read_text(encoding='utf-8'))['scenes']),settings,api.safe_name)
     identity={'template_hash':hashlib.sha256(Path(manifest).read_bytes()).hexdigest(),'input':str(source),
-              'settings':settings,'naming_schema':'source_sequence_v1',
+              'settings':settings,'naming_schema':'custom_patterns_v2' if 'naming' in settings else 'source_sequence_v1',
               'files':[[path.name,size,mtime] for path,size,mtime in files]}
     dest=Path(resume) if resume else api.unique_dir(output_folder,'高速套图')
     with batch_lock(dest):
         if resume:
             state=json.loads((dest/'运行状态.json').read_text(encoding='utf-8'))
-            if state['identity'].get('naming_schema')!='source_sequence_v1': raise ValueError('这个旧批次的命名规则不同，请新建批次。')
+            if state['identity'].get('naming_schema') not in ('source_sequence_v1','custom_patterns_v2'): raise ValueError('这个旧批次的命名规则不同，请新建批次。')
             if state['identity']!=identity: raise ValueError('输入文件、模板或输出设置与原批次不同，不能继续该批次')
             replay_journal(dest,state)
         else: state={'identity':identity,'records':{},'template_path':str(Path(manifest).resolve())}
@@ -268,7 +265,7 @@ def run_batch(api,manifest,input_folder,output_folder,settings,limit=0,resume=No
                             path,old=pending.pop(job);prepared=None
                             try:
                                 prepared=job.result()
-                                record=publish_product(prepared,dest,path.name,old,journal,state,api.safe_name)
+                                record=publish_product(prepared,dest,path.name,old,journal,state,api.safe_name,plans[path.name])
                             except ProgressWriteError: raise
                             except Exception as error:
                                 record={'status':'失败','count':0,'outputs':[],'error':str(error)}
