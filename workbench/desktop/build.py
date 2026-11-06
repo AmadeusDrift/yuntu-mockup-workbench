@@ -45,7 +45,7 @@ def build_portable():
                     raise ValueError('运行环境压缩包路径无效')
             package.extractall(stage)
     app_root.mkdir(parents=True, exist_ok=True)
-    for name in ('main.cjs','preload.cjs','package.json','installer_helper.py'):
+    for name in ('main.cjs','preload.cjs','package.json','installer_helper.py','updater.cjs','update-public-key.pem'):
         shutil.copyfile(Path(__file__).parent/name,app_root/name)
     print('Copying bundled Python and PSD engine...', flush=True)
     for name in ('runtime', 'vendor'):
@@ -95,11 +95,12 @@ def build_installer():
         'InstallDir "$LOCALAPPDATA\\Programs\\YuntuMockupWorkbench"','RequestExecutionLevel user',
         'InstallDirRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "UninstallString"',
         'SetCompressor zlib','!include "MUI2.nsh"','!include "FileFunc.nsh"',
-        'AllowSkipFiles off','Var ExtractOnly','Var NoRegister','Var CloseArgument','Var ResultMessage',
+        'AllowSkipFiles off','Var ExtractOnly','Var NoRegister','Var CloseArgument','Var ResultMessage','Var AutoRestart','Var DataProfile',
         'Function .onInit','${GetParameters} $0','ClearErrors',
         '${GetOptions} $0 "/EXTRACTONLY" $1','IfErrors normal_install',
         'StrCpy $ExtractOnly "1"','normal_install:','ClearErrors',
-        '${GetOptions} $0 "/NOREGISTER" $1','IfErrors options_done','StrCpy $NoRegister "1"','options_done:','FunctionEnd',
+        '${GetOptions} $0 "/NOREGISTER" $1','IfErrors options_done','StrCpy $NoRegister "1"','options_done:','ClearErrors',
+        '${GetOptions} $0 "/AUTORESTART" $1','IfErrors auto_done','StrCpy $AutoRestart "1"','SetSilent silent','auto_done:', 'StrCpy $DataProfile "$APPDATA\\套图工作台"', 'ClearErrors', '${GetOptions} $0 "/PROFILE=" $1', 'IfErrors profile_done', 'StrCpy $DataProfile $1', 'profile_done:', 'FunctionEnd',
         f'!define MUI_ICON "{quote(app_root/"app.ico")}"',
         '!define MUI_WELCOMEPAGE_TEXT "安装或更新套图工作台。已有模板、设置和批次记录会保留；更新前会备份设置。请勿在更新过程中启动软件。"',
         '!insertmacro MUI_PAGE_WELCOME','!insertmacro MUI_PAGE_DIRECTORY','!insertmacro MUI_PAGE_INSTFILES',
@@ -108,16 +109,16 @@ def build_installer():
         'Section "安装"','SetShellVarContext current','InitPluginsDir','SetOutPath "$PLUGINSDIR\\payload"',f'File /r "{quote(stage)}\\*"',
         'StrCmp $ExtractOnly "1" extract_only',
         'DetailPrint "正在检查已有版本和运行状态…"',
-        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$APPDATA\\套图工作台" --result "$PLUGINSDIR\\update-result.ini" --action check\'',
+        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$DataProfile" --result "$PLUGINSDIR\\update-result.ini" --action check\'',
         'Pop $0','StrCmp $0 "0" apply_update','StrCmp $0 "20" close_running update_failed',
         'close_running:','IfSilent update_failed',
         'MessageBox MB_OKCANCEL|MB_ICONINFORMATION "检测到套图工作台正在运行。点击确定，将保存套图进度并关闭软件，然后继续更新。" IDOK allow_close',
         'SetErrorLevel 20','Abort','allow_close:','StrCpy $CloseArgument "--close-running"',
         'apply_update:','DetailPrint "正在备份设置并更新程序，请稍候…"','Delete "$PLUGINSDIR\\update-result.ini"',
-        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$APPDATA\\套图工作台" --result "$PLUGINSDIR\\update-result.ini" --action install $CloseArgument\'',
+        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$DataProfile" --result "$PLUGINSDIR\\update-result.ini" --action install $CloseArgument\'',
         'Pop $0','StrCmp $0 "0" register_install update_failed',
         'extract_only:',
-        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$APPDATA\\套图工作台" --result "$PLUGINSDIR\\update-result.ini" --action extract\'',
+        'nsExec::ExecToLog \'"$PLUGINSDIR\\payload\\resources\\app\\python\\runtime\\python.exe" -I -B "$PLUGINSDIR\\payload\\resources\\app\\installer_helper.py" --payload "$PLUGINSDIR\\payload" --target "$INSTDIR" --data-root "$DataProfile" --result "$PLUGINSDIR\\update-result.ini" --action extract\'',
         'Pop $0','StrCmp $0 "0" install_done update_failed',
         'register_install:','StrCmp $NoRegister "1" install_done','SetOutPath "$INSTDIR"',
         'WriteUninstaller "$INSTDIR\\卸载套图工作台.exe"',
@@ -127,13 +128,14 @@ def build_installer():
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DisplayName" "套图工作台"',
         f'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DisplayVersion" "{VERSION}"',
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "InstallLocation" "$INSTDIR"',
-        'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DataLocation" "$APPDATA\\套图工作台"',
+        'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DataLocation" "$DataProfile"',
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "UninstallString" \'"$INSTDIR\\卸载套图工作台.exe"\'',
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YuntuMockupWorkbench" "DisplayIcon" "$INSTDIR\\resources\\app\\app.ico"',
         'Goto install_done','update_failed:','ReadINIStr $ResultMessage "$PLUGINSDIR\\update-result.ini" "update" "message"',
         'StrCmp $ResultMessage "" 0 error_message_ready','StrCpy $ResultMessage "安装未完成，旧版未被覆盖或恢复记录已保留。请关闭软件后重新运行安装包。"',
-        'error_message_ready:','DetailPrint "$ResultMessage"','IfSilent +2','MessageBox MB_OK|MB_ICONSTOP "$ResultMessage"',
-        'SetErrorLevel 10','Abort','install_done:','SectionEnd','Section "Uninstall"','SetShellVarContext current']
+        'error_message_ready:','DetailPrint "$ResultMessage"','StrCmp $AutoRestart "1" show_update_error','IfSilent skip_update_error','show_update_error:','MessageBox MB_OK|MB_ICONSTOP "$ResultMessage"','skip_update_error:',
+        'SetErrorLevel 10','Abort','install_done:','StrCmp $AutoRestart "1" 0 restart_done','StrCmp $ExtractOnly "1" restart_done',
+        'Exec \'"$INSTDIR\\套图工作台.exe" --data-dir="$DataProfile"\'','restart_done:','SectionEnd','Section "Uninstall"','SetShellVarContext current']
     # Delete only installed files, never recursively remove a user-selected directory.
     for entry in stage.rglob('*'):
         if entry.is_file():lines.append('Delete "$INSTDIR\\'+quote(entry.relative_to(stage))+'"')
@@ -154,3 +156,4 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--portable-only',action='store_true');args=parser.parse_args()
     build_portable()
     if not args.portable_only:build_installer()
+

@@ -1,5 +1,6 @@
 /* Desktop work surface: shared controls, four-step editor, persistent preview. */
 :root{--ink:#182b49;--muted:#5d6e85;--blue:#245de8;--blue-dark:#1745bb;--border:#dde3ec;--surface:#f4f6f9;--radius:12px}
+#check-update{font-size:12px}#update-dialog{width:min(480px,90vw);padding:25px;border:1px solid var(--border);color:var(--ink);box-shadow:0 20px 70px #182b4930}#update-dialog::backdrop{background:#182b4960}#update-dialog header{display:flex;align-items:center;justify-content:space-between;gap:15px}#update-dialog h2{margin:0}#update-dialog p{line-height:1.8;margin-top:18px}#update-notes{font:inherit;line-height:1.8;white-space:pre-wrap;max-height:200px;overflow:auto}#update-dialog footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:25px}
 *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#c1cad8 transparent}
 [hidden]{display:none!important}
 body{margin:0;color:var(--ink);background:var(--surface);font-family:"Segoe UI","Microsoft YaHei UI",sans-serif;font-size:13px}

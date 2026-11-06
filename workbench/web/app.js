@@ -14,7 +14,7 @@ let artworkFiles = [], artworkTotal = 0, artworkOffset = 0, artworkFolder = '', 
 let sceneSettingsOpen = false, advancedOpen = false, preferenceTimer;
 let customFolderRule = false, customImageRule = false, draggedScene = null, imageItems = [], imageIndex = 0;
 const titles = {workbench:'套图工作台', templates:'模板管理', history:'批次记录', cache:'缓存管理'};
-const blocked = () => !connected || activeStatuses.includes(state.task?.status) || busyRequest;
+const blocked = () => !!window.workbenchUpdateInstalling || !connected || activeStatuses.includes(state.task?.status) || busyRequest;
 const currentTemplate = () => state.templates.find((t) => t.id === selectedId);
 const scenesFor = (template) => sceneDraft.get(template.id) || template.scenes || [];
 function notify(message, error = false) {
@@ -405,3 +405,5 @@ async function refresh() {
 }
 async function poll() { await refresh(); setTimeout(poll, activeStatuses.includes(state.task?.status)?1000:3000); }
 poll();
+
+window.addEventListener('workbench-update-lock',updateLocks);

@@ -14,5 +14,7 @@
   <div id="toast" role="status" aria-live="polite"></div>
   <dialog id="image-dialog" aria-label="图片预览"><header><span id="image-title" aria-live="polite"></span><button type="button" class="icon" id="close-image" aria-label="关闭预览">✕</button></header><img id="large-image" alt="套图大图预览"><footer class="image-navigation"><button id="previous-image" type="button" aria-label="上一张预览图">← 上一张</button><small>键盘 ← → 切换 · Esc 关闭</small><button id="next-image" type="button" aria-label="下一张预览图">下一张 →</button></footer></dialog>
   <script type="module" src="/app.js"></script>
+  <dialog id="update-dialog" aria-labelledby="update-title"><header><h2 id="update-title">软件更新</h2><small id="update-current"></small></header><p id="update-message"></p><pre id="update-notes"></pre><progress id="update-progress" max="100" hidden></progress><p class="field-help">仅更新时联网。下载完成后自动校验并安装；有套图任务时，会先询问是否保存进度。</p><footer><button id="update-recheck">重新检查</button><button id="update-cancel" hidden>取消下载</button><button id="update-close">稍后再说</button><button id="update-download" class="primary" hidden>立即更新</button><button id="update-install" class="primary" hidden>安装并重启</button></footer></dialog>
+  <script type="module" src="/updates.js"></script>
 </body>
 </html>

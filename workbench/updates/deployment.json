@@ -1,0 +1,16 @@
+{
+  "account_id": "e4ae0f44249c105791d1e64969abc669",
+  "zone_id": "2da9d4803d18296513ea3613bdfb5933",
+  "hostname": "taotu.htcerp.app",
+  "worker": "taotu-workbench-updates",
+  "bucket": "taotu-workbench-releases",
+  "binding": "RELEASES",
+  "compatibility_date": "2026-11-05",
+  "manifest_url": "https://taotu.htcerp.app/updates/stable/latest.json",
+  "desktop_client_status": "implemented-0.3.1",
+  "published_release": "0.3.1",
+  "verified_on": "2026-11-06 Asia/Shanghai",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ]
+}

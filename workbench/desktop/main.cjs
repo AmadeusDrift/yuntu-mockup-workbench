@@ -4,6 +4,7 @@ const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+const {Updater}=require('./updater.cjs');
 
 app.setName('套图工作台');
 app.setAppUserModelId('com.yuntu.mockup.workbench');
@@ -12,6 +13,35 @@ const explicitData = process.argv.find(arg => arg.startsWith('--data-dir='));
 if (explicitData) app.setPath('userData', path.resolve(explicitData.slice(11)));
 const dataRoot = app.getPath('userData');
 let window, backend, origin = '', exiting = false, closing = false;
+let updater, installInFlight=false;
+
+async function installUpdate() {
+  if(installInFlight||closing||!updater||updater.busy||updater.state.status==='installing')return;
+  installInFlight=true;
+  let file;
+  try {
+    file=await updater.verifiedInstaller();
+    const state=await api('/api/state');
+    if(['running','paused','stopping'].includes(state.task.status)) {
+      const result=await dialog.showMessageBox(window,{type:'question',title:'保存进度并更新',message:'当前还有套图任务，是否保存进度后安装更新？',detail:'更新后可在“批次记录”继续处理。',buttons:['保存并更新','稍后安装'],defaultId:1,cancelId:1});
+      if(result.response!==0)return;
+    }
+    updater.set({status:'installing',message:'正在保存进度，请稍候…'});
+    // Require a successful task stop before handing over to the installer.
+    const wasActive=['running','paused','stopping'].includes(state.task.status);
+    if(wasActive)await api('/api/control',{action:'stop'});
+    let latest=await api('/api/state');
+    while(['running','paused','stopping'].includes(latest.task.status)){await new Promise(r=>setTimeout(r,250));latest=await api('/api/state')}
+    if(wasActive&&(latest.task.status==='failed'||latest.task.error))throw new Error('任务未能成功保存，请先处理：'+(latest.task.error||latest.task.message));
+    closing=true;await stopBackend();
+    const installer=spawn(file,['/AUTORESTART','/PROFILE="'+dataRoot+'"','/D='+path.dirname(app.getPath('exe'))],{detached:true,stdio:'ignore',windowsHide:false,windowsVerbatimArguments:true});
+    await new Promise((resolve,reject)=>{installer.once('spawn',resolve);installer.once('error',reject)});installer.unref();
+    exiting=true;window.destroy();app.quit();
+  } catch(error) {
+    updater.set({status:'error',message:'安装未启动：'+error.message});
+    if(closing){dialog.showErrorBox('更新未完成','请重新打开软件重试。原程序和数据仍保留。\n'+error.message);exiting=true;app.quit()}
+  } finally {installInFlight=false}
+}
 
 function api(route, body) {
   return new Promise((resolve, reject) => {
@@ -112,6 +142,7 @@ else {
   app.whenReady().then(async()=>{
     if(fs.existsSync(path.join(path.dirname(app.getPath('exe')),'.workbench-update.json')))throw new Error('上次更新尚未完成。请关闭软件，重新运行安装包，恢复完成后再打开。');
     seedData();Menu.setApplicationMenu(null);
+    updater=new Updater({dataRoot,version:app.getVersion(),publicKey:fs.readFileSync(path.join(__dirname,'update-public-key.pem'),'utf8'),onChange:state=>{if(window&&!window.isDestroyed())window.webContents.send('update-state',state)}});
     const area=screen.getPrimaryDisplay().workAreaSize;
     window=new BrowserWindow({width:Math.min(1520,area.width),height:Math.min(960,area.height),minWidth:1060,minHeight:700,
       title:'套图工作台 v'+app.getVersion(),show:false,backgroundColor:'#f3f8fe',icon:path.join(__dirname,'app.ico'),
@@ -135,9 +166,15 @@ else {
       return {paths:result.canceled?[]:result.filePaths};
     });
     ipcMain.handle('open-output',async(event,folder)=>{trusted(event);return api('/api/open-output',{path:folder})});
+    ipcMain.handle('update-state',event=>{trusted(event);return updater.state});
+    ipcMain.handle('update-check',event=>{trusted(event);return updater.check(true)});
+    ipcMain.handle('update-download',async event=>{trusted(event);await updater.download();if(updater.state.status==='ready')await installUpdate();return updater.state});
+    ipcMain.handle('update-cancel',event=>{trusted(event);updater.cancel()});
+    ipcMain.handle('update-install',event=>{trusted(event);return installUpdate()});
     origin=await launchBackend();
     fs.writeFileSync(path.join(dataRoot,'desktop-status.json'),JSON.stringify({desktop_pid:process.pid,backend_pid:backend.pid,url:origin}));
     await window.loadURL(origin+'/');window.show();
+    setTimeout(()=>{if(!closing&&!exiting)updater.check(false)},5000);
   }).catch(async error=>{
     dialog.showErrorBox('套图工作台未能打开',error.message);
     exiting=true;await stopBackend();app.quit();
