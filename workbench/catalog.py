@@ -144,7 +144,10 @@ def updated_scenes(template, submitted):
             raise ValueError('选择了不属于这个场景的图层')
         if mode == 'replace' and not targets:
             raise ValueError(f'场景 {original["name"]} 需要选择至少一个印花层')
-        result.append(dict(original, mode=mode, targets=targets))
+        roles=scene.get('artwork_roles',original.get('artwork_roles',{}))
+        if not isinstance(roles,dict) or any(key not in {l['id'] for l in original['candidates']} or value not in ('left','center','right') for key,value in roles.items()):
+            raise ValueError('印花图层对应关系无效')
+        result.append(dict(original, mode=mode, targets=targets,artwork_roles=dict(roles)))
     if all(s['mode'] == 'skip' for s in result):
         raise ValueError('至少保留一个导出场景')
     return result
@@ -174,6 +177,7 @@ def compile_template(template, folder, progress=lambda message: None):
                 raise ValueError('换图场景没有选择印花层')
             originals = []
             try:
+                compiler.artwork_roles={id(layer_lookup[ident]):role for ident,role in scene.get('artwork_roles',{}).items()}
                 for ident in scene['targets']:
                     layer = layer_lookup[ident]
                     originals.append((layer, layer.name))

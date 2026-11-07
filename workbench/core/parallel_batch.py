@@ -20,9 +20,7 @@ LOCK='批次运行锁'
 class ProgressWriteError(OSError):
     pass
 
-def signature(path):
-    info=Path(path).stat()
-    return (info.st_size,info.st_mtime_ns)
+from artwork_sources import signature, discover, group_members, source_key, validate_roles
 
 def sha256(path):
     digest=hashlib.sha256()
@@ -32,14 +30,7 @@ def sha256(path):
 
 def input_snapshot(folder,extensions,limit):
     if limit<0: raise ValueError('测试数量不能为负数')
-    rows=[]
-    # Windows directory entries already contain size/time metadata. Fetch it once.
-    with os.scandir(folder) as entries:
-        for entry in entries:
-            if Path(entry.name).suffix.lower() in extensions and entry.is_file():
-                stat=entry.stat()
-                rows.append((Path(entry.path),stat.st_size,stat.st_mtime_ns))
-    rows.sort(key=lambda row:[int(p) if p.isdigit() else p.casefold() for p in re.split(r'(\d+)',row[0].name)])
+    rows=[(path,*signature(path)) for path in discover(folder,extensions)]
     return rows[:limit] if limit else rows
 
 def prepare_product(renderer,source,local_dir,settings,expected_signature):
@@ -49,7 +40,11 @@ def prepare_product(renderer,source,local_dir,settings,expected_signature):
     job=Path(tempfile.mkdtemp(prefix='sku_',dir=str(local_dir)))
     try:
         local_input=job/('input'+source.suffix)
-        shutil.copyfile(source,local_input)
+        members=group_members(source)
+        if members:
+            local_input=job/'input';local_input.mkdir()
+            for role,path in members.items():shutil.copyfile(path,local_input/(role+path.suffix))
+        else:shutil.copyfile(source,local_input)
         files=[]
         for index,(_,image) in enumerate(renderer.render(local_input,settings),1):
             path=job/f'render_{index:02d}.{settings["format"]}'
@@ -75,7 +70,10 @@ def prepare_product(renderer,source,local_dir,settings,expected_signature):
             finally: image.close()
         if len(files)!=len(renderer.data['scenes']): raise ValueError('生成的场景张数不完整')
         if signature(source)!=tuple(expected_signature): raise ValueError('处理期间原图发生变化，请新建批次。')
-        local_input.unlink()
+        if local_input.is_dir():
+            for child in local_input.iterdir():child.unlink()
+            local_input.rmdir()
+        else:local_input.unlink()
         return {'dir':job,'files':files,'format':settings['format']}
     except BaseException:
         remove_local_job(job,Path(local_dir))
@@ -193,13 +191,13 @@ def completed_record(dest,record,expected):
         except OSError: return False
     return True
 
-def write_csv(path,files,records):
+def write_csv(path,files,records,root):
     temp=path.with_name(path.name+'.part')
     with open(temp,'w',encoding='utf-8-sig',newline='') as stream:
         writer=csv.writer(stream);writer.writerow(['输入文件','结果','输出张数','说明'])
         for source,_,_ in files:
-            row=records.get(source.name)
-            if row: writer.writerow([source.name,row['status'],row.get('count',0),row.get('error','')])
+            row=records.get(source_key(source,root))
+            if row: writer.writerow([source_key(source,root),row['status'],row.get('count',0),row.get('error','')])
         stream.flush();os.fsync(stream.fileno())
     os.replace(temp,path)
 
@@ -208,7 +206,7 @@ def checkpoint(api,dest,state,files,journal=None):
     with open(temporary,'w',encoding='utf-8') as stream:
         json.dump(state,stream,ensure_ascii=False,indent=2);stream.flush();os.fsync(stream.fileno())
     os.replace(temporary,path)
-    write_csv(dest/'处理记录.csv',files,state['records'])
+    write_csv(dest/'处理记录.csv',files,state['records'],state['identity']['input'])
     if journal is not None:
         journal.seek(0);journal.truncate();journal.flush();os.fsync(journal.fileno())
 
@@ -218,12 +216,13 @@ def run_batch(api,manifest,input_folder,output_folder,settings,limit=0,resume=No
     settings=api.settings_checked(settings);control=control or api.Control()
     source=Path(input_folder).resolve()
     files=input_snapshot(source,api.EXTENSIONS,limit)
-    if not files: raise ValueError('输入文件夹中没有支持的图片；不读取子文件夹')
+    if not files: raise ValueError('输入文件夹中没有支持的图片或完整的三联画文件夹')
     from export_naming import plan_outputs
-    plans=plan_outputs(files,len(json.loads(Path(manifest).read_text(encoding='utf-8'))['scenes']),settings,api.safe_name)
+    plans=plan_outputs(files,len(json.loads(Path(manifest).read_text(encoding='utf-8'))['scenes']),settings,api.safe_name,source_root=source)
     identity={'template_hash':hashlib.sha256(Path(manifest).read_bytes()).hexdigest(),'input':str(source),
               'settings':settings,'naming_schema':'custom_patterns_v2' if 'naming' in settings else 'source_sequence_v1',
-              'files':[[path.name,size,mtime] for path,size,mtime in files]}
+              'files':[[source_key(path,source),size,mtime] for path,size,mtime in files]}
+    if any(path.is_dir() for path,_,_ in files):validate_roles(json.loads(Path(manifest).read_text(encoding='utf-8')))
     dest=Path(resume) if resume else api.unique_dir(output_folder,'高速套图')
     with batch_lock(dest):
         if resume:
@@ -250,9 +249,9 @@ def run_batch(api,manifest,input_folder,output_folder,settings,limit=0,resume=No
                     while next_index<len(files) or pending:
                         while next_index<len(files) and len(pending)<workers and not control.stop.is_set() and not control.paused.is_set():
                             path,size,mtime=files[next_index];next_index+=1
-                            old=state['records'].get(path.name,{})
+                            old=state['records'].get(source_key(path,source),{})
                             if completed_record(dest,old,expected):
-                                completed+=1;progress(completed,len(files),path.name,'已完成，跳过',str(dest));continue
+                                completed+=1;progress(completed,len(files),source_key(path,source),'已完成，跳过',str(dest));continue
                             job=pool.submit(prepare_product,renderer,path,local_root,settings,(size,mtime))
                             pending[job]=(path,old)
                         if not pending:
@@ -265,15 +264,15 @@ def run_batch(api,manifest,input_folder,output_folder,settings,limit=0,resume=No
                             path,old=pending.pop(job);prepared=None
                             try:
                                 prepared=job.result()
-                                record=publish_product(prepared,dest,path.name,old,journal,state,api.safe_name,plans[path.name])
+                                record=publish_product(prepared,dest,source_key(path,source),old,journal,state,api.safe_name,plans[source_key(path,source)])
                             except ProgressWriteError: raise
                             except Exception as error:
                                 record={'status':'失败','count':0,'outputs':[],'error':str(error)}
-                                append_record(journal,path.name,record);state['records'][path.name]=record
+                                append_record(journal,source_key(path,source),record);state['records'][source_key(path,source)]=record
                             finally:
                                 if prepared is not None: remove_local_job(prepared['dir'],local_root)
-                            writer.writerow([path.name,record['status'],record.get('count',0),record.get('error','')]);csv_stream.flush()
-                            completed+=1;progress(completed,len(files),path.name,record['status'],str(dest))
+                            writer.writerow([source_key(path,source),record['status'],record.get('count',0),record.get('error','')]);csv_stream.flush()
+                            completed+=1;progress(completed,len(files),source_key(path,source),record['status'],str(dest))
             except BaseException:
                 failed=True;raise
             finally:

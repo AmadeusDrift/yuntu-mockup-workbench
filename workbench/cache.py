@@ -14,7 +14,7 @@ SCHEMA = 2
 
 def cache_key(template):
     identity = {'schema': SCHEMA, 'digest': template['digest'], 'scenes': [
-        {key: s.get(key) for key in ('id', 'mode', 'targets')} for s in template['scenes']]}
+        {key: s.get(key) for key in ('id', 'mode', 'targets', 'artwork_roles')} for s in template['scenes']]}
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 

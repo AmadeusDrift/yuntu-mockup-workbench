@@ -28,11 +28,11 @@ def checked_naming(value, safe_name):
     return result
 
 
-def plan_outputs(files, scenes, settings, safe_name):
+def plan_outputs(files, scenes, settings, safe_name, source_root=None):
     rules = checked_naming(settings['naming'], safe_name) if 'naming' in settings else dict(folder='{name}', image='{name}_{scene:02}', start=1)
     plans, folders = {}, set()
     for offset, (path, _, _) in enumerate(files):
-        values = dict(name=safe_name(path.stem), index=rules['start'] + offset)
+        values = dict(name=safe_name(path.name if path.is_dir() else path.stem), index=rules['start'] + offset)
         folder = rules['folder'].format(**values)
         names = [rules['image'].format(**values, folder=folder, scene=i) + '.' + settings['format'] for i in range(1, scenes + 1)]
         if safe_name(folder) != folder or ('naming' in settings and any(safe_name(name) != name for name in names)):
@@ -42,5 +42,6 @@ def plan_outputs(files, scenes, settings, safe_name):
         if len({name.casefold() for name in names}) != len(names):
             raise ValueError('导出图片重名，请在规则中加入 {scene:02}')
         folders.add(folder.casefold())
-        plans[path.name] = dict(folder=folder, files=names)
+        from artwork_sources import source_key
+        plans[source_key(path,source_root) if source_root else path.name] = dict(folder=folder, files=names)
     return plans

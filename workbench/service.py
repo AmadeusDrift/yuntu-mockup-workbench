@@ -178,33 +178,33 @@ class Service:
         root = Path(folder)
         if not root.is_dir():
             raise ValueError('请选择存在的印花文件夹')
-        return sorted((p for p in root.iterdir() if p.is_file() and p.suffix.lower() in engine.EXTENSIONS),
-                      key=lambda p: catalog.natural(p.name))
+        from artwork_sources import discover
+        return discover(root,engine.EXTENSIONS)
 
     def artworks(self, folder, offset=0, limit=40):
         offset=int(offset);limit=min(100,max(1,int(limit)))
         if offset<0:raise ValueError('图片分页位置不能为负数')
         images=self.input_images(folder)
         files=[]
-        from PIL import Image, ImageOps
+        from artwork_sources import thumbnail as source_thumbnail, signature as source_signature, source_key
         cache=self.root/'artworks'
         for path in images[offset:offset+limit]:
-            stat=path.stat()
-            key=hashlib.sha256((str(path.resolve())+f'|{stat.st_size}|{stat.st_mtime_ns}').encode('utf-8')).hexdigest()
+            key=hashlib.sha256((str(path.resolve())+repr(source_signature(path))).encode('utf-8')).hexdigest()
+            label=source_key(path,Path(folder))
+            kind='triptych' if path.is_dir() else 'image'
             thumbnail=cache/(key+'.png')
             try:
-                with Image.open(path) as raw:
-                    image=ImageOps.exif_transpose(raw).convert('RGBA')
+                with source_thumbnail(path) as image:
                     width,height=image.size
                     has_alpha=image.getchannel('A').getextrema()[0]<255
                     if not thumbnail.is_file():
-                        image.thumbnail((220,220),Image.Resampling.LANCZOS)
+                        image.thumbnail((220,220))
                         image.save(thumbnail)
                     else:thumbnail.touch()
-                files.append(dict(path=str(path.resolve()),name=path.name,url='/media/artworks/'+thumbnail.name,
+                files.append(dict(path=str(path.resolve()),name=label,kind=kind,url='/media/artworks/'+thumbnail.name,
                                   width=width,height=height,has_alpha=has_alpha))
             except (OSError,ValueError) as exc:
-                files.append(dict(path=str(path.resolve()),name=path.name,url='',width=0,height=0,
+                files.append(dict(path=str(path.resolve()),name=label,kind=kind,url='',width=0,height=0,
                                   has_alpha=False,error='图片无法读取：'+str(exc)))
         cached=sorted((p for p in cache.glob('*.png') if not p.is_symlink()),key=lambda p:p.stat().st_mtime,reverse=True)
         for path in cached[512:]:
@@ -216,8 +216,8 @@ class Service:
     def output_directory(value, input_folder=''):
         if not str(value).strip():raise ValueError('请选择输出文件夹')
         output=Path(value).resolve()
-        if str(input_folder).strip() and output==Path(input_folder).resolve():
-            raise ValueError('输出文件夹必须与印花文件夹分开')
+        if str(input_folder).strip() and (output==Path(input_folder).resolve() or Path(input_folder).resolve() in output.parents):
+            raise ValueError('输出文件夹必须与印花文件夹分开，不能放在印花文件夹内部')
         # Windows reserved names and invalid components must fail before mkdir.
         for part in output.parts[1:]:
             if engine.safe_name(part)!=part or part.endswith((' ','.')):
@@ -262,7 +262,7 @@ class Service:
             if not images:
                 raise ValueError('印花文件夹里没有支持的图片')
             source = images[0]
-        if not source.is_file():
+        if not source.is_file() and not source.is_dir():
             raise ValueError('请选择一张印花图片或印花文件夹')
         def work():
             manifest = self.manifest(template)
@@ -277,7 +277,7 @@ class Service:
                         if op.get('base_op'):collect([op['base_op']])
                 for scene in renderer.data['scenes']:
                     if not scene.get('fixed'):collect(scene['ops'])
-                if native_sizes and (settings['fit']=='auto' or 'orientation' in settings):
+                if source.is_file() and native_sizes and (settings['fit']=='auto' or 'orientation' in settings):
                     artwork=engine.load_image(source,preserve_alpha=True)
                     try:
                         direction_source=engine.prepare_cover_artwork(artwork) if settings['fit']=='cover_bleed' else artwork
@@ -303,7 +303,7 @@ class Service:
                     self.update(progress=i + 1, total=len(renderer.data['scenes']), message='生成场景 ' + name)
                 self.update(preview=previews, preview_fit=fit_info, preview_template_id=template['id'], preview_settings=settings,
                             preview_source=requested_source, preview_scenes=[
-                                {k: s[k] for k in ('id', 'mode', 'targets')} for s in template['scenes']])
+                                {k: s.get(k,{}) for k in ('id', 'mode', 'targets', 'artwork_roles')} for s in template['scenes']])
                 del renderer
             # Keep recent previews only; paths checked before any recursive removal.
             import shutil

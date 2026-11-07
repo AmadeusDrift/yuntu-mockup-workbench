@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -34,8 +35,8 @@ def build_portable():
     release.mkdir(exist_ok=True)
     if stage.resolve().parent != release.resolve():
         raise ValueError('发行目录范围无效')
-    archive = next((Path.home()/'AppData/Local/electron/Cache').glob('*/electron-v45.1.0-win32-x64.zip'))
     if not stage.exists():
+        archive = next((Path.home()/'AppData/Local/electron/Cache').glob('*/electron-v45.1.0-win32-x64.zip'))
         print('Extracting cached Electron 45.1.0...', flush=True)
         stage.mkdir()
         with zipfile.ZipFile(archive) as package:
@@ -86,7 +87,7 @@ def build_portable():
 
 
 def build_installer():
-    makensis=next((Path.home()/'AppData/Local/electron-builder/Cache').glob('nsis-*/nsis-*/Bin/makensis.exe'))
+    makensis=Path(os.environ['WORKBENCH_MAKENSIS']) if os.environ.get('WORKBENCH_MAKENSIS') else next((Path.home()/'AppData/Local/electron-builder/Cache').glob('nsis-*/nsis-*/Bin/makensis.exe'))
     installer=release/'套图工作台安装.exe'
     source=release/'installer.nsi'
     def quote(value):return str(value).replace('$','$$').replace('"','$\\"')

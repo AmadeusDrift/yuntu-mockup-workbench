@@ -306,6 +306,8 @@ class Compiler:
         mask=self.mask(layer,size,label)
         slot={'kind':'slot','native_size':native,'quad':quad,'opacity':layer.opacity,'blend':self.blend_name(layer),
               'mask':self.asset(mask) if mask else None,'shadow':self.shadow(layer,label)}
+        role=getattr(self,'artwork_roles',{}).get(id(layer))
+        if role:slot['artwork_role']=role
         if b'quiltWarp' in data:
             from quilt_warp import parse_quilt,build_uv_map
             self.index+=1;filename=f'warp_{self.index:04d}.npz'
@@ -732,31 +734,34 @@ class Renderer:
                             layer=compose(op['ops'],initial=plane)
                         layer.putalpha(base.getchannel('A'))
                 elif op['kind']=='slot':
+                    role=op.get('artwork_role')
+                    slot_artwork=artwork[role] if isinstance(artwork,dict) else artwork
+                    slot_prepared=prepared.setdefault(('role',role),{}) if isinstance(artwork,dict) else prepared
                     stage_size=tuple(op['native_size'])
-                    if stage_size not in prepared:
-                        working=artwork
+                    if stage_size not in slot_prepared:
+                        working=slot_artwork
                         if mode=='cover_bleed':
-                            if 'cover_artwork' not in prepared:prepared['cover_artwork']=prepare_cover_artwork(artwork)
-                            working=prepared['cover_artwork']
+                            if 'cover_artwork' not in slot_prepared:slot_prepared['cover_artwork']=prepare_cover_artwork(slot_artwork)
+                            working=slot_prepared['cover_artwork']
                         angle=0
                         if orientation!='original' or rotation:
                             geometry=('orientation_size',id(working))
-                            if geometry not in prepared:prepared[geometry]=artwork_content_size(working) if orientation=='auto' else working.size
-                            angle=combined_rotation(rotation_for_size(prepared[geometry],stage_size,orientation),rotation)
+                            if geometry not in slot_prepared:slot_prepared[geometry]=artwork_content_size(working) if orientation=='auto' else working.size
+                            angle=combined_rotation(rotation_for_size(slot_prepared[geometry],stage_size,orientation),rotation)
                             if angle in (0,90,180,270):
                                 rotated=('orientation_image',id(working),angle)
-                                if rotated not in prepared:prepared[rotated]=rotate_artwork(working,angle)
-                                working=prepared[rotated]
-                        if angle not in (0,90,180,270):prepared[stage_size]=fit_rotated_artwork(working,stage_size,mode,angle,preserve_alpha=bool(self.data.get('workbench')),policy=fit_policy)
-                        elif mode=='cover_bleed':prepared[stage_size]=cover_with_bleed(working,stage_size)
-                        else:prepared[stage_size]=fit_image(working,stage_size,mode,
+                                if rotated not in slot_prepared:slot_prepared[rotated]=rotate_artwork(working,angle)
+                                working=slot_prepared[rotated]
+                        if angle not in (0,90,180,270):slot_prepared[stage_size]=fit_rotated_artwork(working,stage_size,mode,angle,preserve_alpha=bool(self.data.get('workbench')),policy=fit_policy)
+                        elif mode=='cover_bleed':slot_prepared[stage_size]=cover_with_bleed(working,stage_size)
+                        else:slot_prepared[stage_size]=fit_image(working,stage_size,mode,
                             preserve_alpha=bool(self.data.get('workbench')),policy=fit_policy)
                     if op.get('warp'):
                         from quilt_warp import render_rgba
-                        layer=render_rgba(prepared[stage_size],self.warp_maps[op['warp']])
+                        layer=render_rgba(slot_prepared[stage_size],self.warp_maps[op['warp']])
                         if layer.size!=size:raise ValueError('网格映射尺寸与场景不一致，请重新导入 PSD')
                     else:
-                        layer=prepared[stage_size].transform(size,Image.Transform.PERSPECTIVE,op['coeff'],Image.Resampling.BICUBIC)
+                        layer=slot_prepared[stage_size].transform(size,Image.Transform.PERSPECTIVE,op['coeff'],Image.Resampling.BICUBIC)
                 else:raise ValueError('未知模板步骤')
                 if op['kind']=='static':
                     ink=self._static_layers[id(op)][1]
@@ -776,10 +781,23 @@ class Renderer:
         return compose(scene['ops'])
 
     def render(self,path,settings):
-        artwork=load_image(path,preserve_alpha=settings['fit'] in ('auto','cover_bleed'));prepared={}
-        if settings.get('trim') and settings['fit']!='auto':
-            bounds=artwork.getchannel('A').getbbox()
-            if bounds:artwork=artwork.crop(bounds)
+        from artwork_sources import group_members,validate_roles
+        members=group_members(path)
+        if members:validate_roles(self.data)
+        images={};prepared={}
+        try:
+            for role,item in (members or {'single':path}).items():
+                artwork=load_image(item,preserve_alpha=settings['fit'] in ('auto','cover_bleed'))
+                if settings.get('trim') and settings['fit']!='auto':
+                    bounds=artwork.getchannel('A').getbbox()
+                    if bounds:
+                        cropped=artwork.crop(bounds);artwork.close();artwork=cropped
+                images[role]=artwork
+            yield from self._render_images(images if members else images['single'],settings,prepared)
+        finally:
+            for image in images.values():image.close()
+
+    def _render_images(self,artwork,settings,prepared):
         fixed_settings=(settings['fit'],settings['width'],settings['height'],settings['format'])
         if fixed_settings!=self._fixed_settings:
             self._fixed_images.clear()
