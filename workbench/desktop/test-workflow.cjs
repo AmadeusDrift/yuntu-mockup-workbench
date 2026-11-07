@@ -26,8 +26,9 @@ async function main(){
  assert(await evaluate(()=>!document.querySelector('#template-no-match').hidden&&document.querySelector('.template-card').hidden));
  await evaluate(()=>{const search=document.querySelector('#template-search');search.value='';search.dispatchEvent(new Event('input',{bubbles:true}));});
  await click('[data-configure-template]');
+ await click('#scene-settings summary');
  await evaluate(()=>{document.querySelector('.scene-list').scrollIntoView({block:'center'});document.querySelector('.scene-list').scrollTop=0;return true;});
- const drag=await evaluate(()=>{const rows=[...document.querySelectorAll('[data-scene-id]')];const a=rows[2].querySelector('[data-drag-scene]').getBoundingClientRect(),b=rows[0].getBoundingClientRect();return {from:{x:a.x+a.width/2,y:a.y+a.height/2},to:{x:b.x+15,y:b.y+8},ids:rows.map(r=>r.dataset.sceneId)}});
+ const drag=await evaluate(()=>{const rows=[...document.querySelectorAll('[data-scene-id]')];const a=rows[1].querySelector('[data-drag-scene]').getBoundingClientRect(),b=rows[0].getBoundingClientRect();return {from:{x:a.x+a.width/2,y:a.y+a.height/2},to:{x:b.x+15,y:b.y+8},ids:rows.map(r=>r.dataset.sceneId)}});
  console.log('Drag coordinates',JSON.stringify(drag));
  await evaluate(points=>{window.qaDragEvents=[];window.addEventListener('error',e=>window.qaDragEvents.push({error:e.message}));document.addEventListener('dragover',e=>window.qaDragEvents.push({bubble:true,prevented:e.defaultPrevented,row:e.target.closest('[data-scene-id]')?.className,dropEffect:e.dataTransfer.dropEffect}));for(const type of ['mousedown','mouseup','dragstart','dragover','drop','dragend'])document.addEventListener(type,e=>window.qaDragEvents.push({type,target:e.target.outerHTML?.slice(0,160),prevented:e.defaultPrevented}),true);return {from:document.elementFromPoint(points.from.x,points.from.y)?.outerHTML.slice(0,250),to:document.elementFromPoint(points.to.x,points.to.y)?.outerHTML.slice(0,250)}},drag).then(console.log);
  await command('Input.dispatchMouseEvent',{type:'mouseMoved',...drag.from});await command('Input.dispatchMouseEvent',{type:'mousePressed',...drag.from,button:'left',clickCount:1});
@@ -35,7 +36,7 @@ async function main(){
  await new Promise(r=>setTimeout(r,100));
  await wait(()=>intercepted);for(const type of ['dragEnter','dragOver','drop'])await command('Input.dispatchDragEvent',{type,...drag.to,data:intercepted.data});await command('Input.dispatchMouseEvent',{type:'mouseReleased',...drag.to,button:'left',clickCount:1});await command('Input.setInterceptDrags',{enabled:false});
  console.log('Drag events',JSON.stringify(await evaluate(()=>window.qaDragEvents)));
- const order=await evaluate(()=>[...document.querySelectorAll('[data-scene-id]')].map(r=>r.dataset.sceneId));assert.deepEqual(order,[drag.ids[2],drag.ids[0],drag.ids[1],...drag.ids.slice(3)],'Real mouse drag must reorder the scene cards');
+ const order=await evaluate(()=>[...document.querySelectorAll('[data-scene-id]')].map(r=>r.dataset.sceneId));assert.deepEqual(order,[drag.ids[1],drag.ids[0],...drag.ids.slice(2)],'Real mouse drag must reorder the scene cards');
  await click('[data-action="save-template"]');await wait(async()=>JSON.stringify((await api('/api/state')).templates[0].scenes.map(s=>s.id))===JSON.stringify(order));
  console.log('PASS: real mouse drag and saved scene order');
  const input=path.join(run,'assets','artworks'),output=path.join(run,'output-ui');
@@ -46,7 +47,7 @@ async function main(){
  await evaluate(value=>{const el=document.querySelector('#output-path');el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true},output);
  await evaluate(()=>{const el=document.querySelector('[data-naming-mode="folder"]');el.value='{index:03}';el.dispatchEvent(new Event('change',{bubbles:true}));return true});
  await wait(async()=>{const s=await api('/api/state');return s.preferences.settings.naming?.folder==='{index:03}'&&s.preferences.output===output;});
- await click('[data-action="preview"]');const preview=await task('preview',s=>s.task.preview?.[0]?.name==='3');assert.deepEqual(preview.task.preview.map(p=>p.name),['3','1','2','4','5','6','7']);
+ await click('[data-action="preview"]');const preview=await task('preview',s=>s.task.preview?.[0]?.name==='2');assert.deepEqual(preview.task.preview.map(p=>p.name),['2','1','3','4','5','6','7']);
  await wait(()=>evaluate(()=>document.querySelectorAll('.preview-tile').length===7));await click('.preview-tile');
  assert.equal(await evaluate(()=>document.querySelector('#image-dialog').open),true);
  const first=await evaluate(()=>document.querySelector('#large-image').src);await key('ArrowRight',39);
@@ -56,7 +57,7 @@ async function main(){
  console.log('PASS: preview follows scene order, left/right keys, buttons and Esc');
  await click('[data-action="batch"]');const batch=await task('batch');const dest=batch.task.results[0];
  for(const folder of ['001','002'])assert.deepEqual(fs.readdirSync(path.join(dest,folder)).sort(),Array.from({length:7},(_,i)=>String(i+1).padStart(2,'0')+'.jpg'));
- assert(fs.readFileSync(path.join(dest,'001','01.jpg')).equals(fs.readFileSync(baseline)),'First reordered output must contain the original scene 3 pixels');
+ assert(fs.readFileSync(path.join(dest,'001','01.jpg')).equals(fs.readFileSync(baseline)),'First reordered output must contain the original scene 2 pixels');
  await click('[data-step-target="3"]');
  await click('[data-fit-choice="contain"]');assert(await evaluate(()=>document.querySelector('[data-fit-choice="contain"]').getAttribute('aria-pressed')==='true'));
  await click('[data-fit-choice="auto"]');
@@ -81,7 +82,7 @@ async function main(){
      await click('[data-step-target="'+step+'"]');
      await evaluate(()=>{document.querySelector('.editor-panel').scrollTop=0;document.querySelectorAll('img').forEach(i=>i.loading='eager');document.activeElement?.blur();});
      await wait(()=>evaluate(()=>[...document.querySelectorAll('.preview-tile img')].every(i=>i.complete&&i.naturalWidth)));
-     await evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+     await evaluate(()=>new Promise(r=>{requestAnimationFrame(()=>requestAnimationFrame(r));setTimeout(r,200)}));
      const dimensions=await evaluate(()=>({doc:document.documentElement.scrollWidth,width:innerWidth,footer:document.querySelector('.workflow-footer').getBoundingClientRect().bottom,height:innerHeight,editor:document.querySelector('.editor-panel').getBoundingClientRect().height,checkbox:getComputedStyle(document.querySelector('[data-setting="trim"]')).width}));
      assert.equal(dimensions.checkbox,'16px');
      assert(dimensions.doc<=width,'Horizontal overflow');assert(dimensions.footer<=height+1,'Primary action outside window');assert(dimensions.editor>150,'Editor too short');
@@ -94,4 +95,5 @@ async function main(){
  console.log('PASS: UI export naming 001/01.jpg through 002/07.jpg; reordered output pixels match');
 }
 main().then(()=>ws?.close()).catch(error=>{console.error(error);ws?.close();process.exitCode=1});
+
 

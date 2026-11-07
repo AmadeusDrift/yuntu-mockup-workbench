@@ -2,6 +2,11 @@
 const {contextBridge, ipcRenderer} = require('electron');
 contextBridge.exposeInMainWorld('desktop', Object.freeze({
   isDesktop: true,
+  window: Object.freeze({
+    state:()=>ipcRenderer.invoke('window-state'),
+    action:action=>ipcRenderer.invoke('window-action',action),
+    onState:callback=>{const handler=(_event,state)=>callback(state);ipcRenderer.on('window-state',handler);return ()=>ipcRenderer.removeListener('window-state',handler)}
+  }),
   choose: (kind) => ipcRenderer.invoke('choose', kind),
   openOutput: (path) => ipcRenderer.invoke('open-output', path),
   updates: Object.freeze({

@@ -145,7 +145,7 @@ else {
     updater=new Updater({dataRoot,version:app.getVersion(),publicKey:fs.readFileSync(path.join(__dirname,'update-public-key.pem'),'utf8'),onChange:state=>{if(window&&!window.isDestroyed())window.webContents.send('update-state',state)}});
     const area=screen.getPrimaryDisplay().workAreaSize;
     window=new BrowserWindow({width:Math.min(1520,area.width),height:Math.min(960,area.height),minWidth:1060,minHeight:700,
-      title:'套图工作台 v'+app.getVersion(),show:false,backgroundColor:'#f3f8fe',icon:path.join(__dirname,'app.ico'),
+      title:'套图工作台 v'+app.getVersion(),frame:false,show:false,backgroundColor:'#f3f8fe',icon:path.join(__dirname,'app.ico'),
       webPreferences:{preload:path.join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true}});
     window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
     window.on('page-title-updated',event=>event.preventDefault());
@@ -155,6 +155,16 @@ else {
       if(exiting)return;
       event.preventDefault();if(closing)return;closing=true;
       stopBackend().finally(()=>{exiting=true;window.destroy();app.quit()});
+    });
+    const windowState=()=>({maximized:window.isMaximized(),minimized:window.isMinimized(),version:app.getVersion()});
+    for(const name of ['maximize','unmaximize','minimize','restore'])window.on(name,()=>window.webContents.send('window-state',windowState()));
+    ipcMain.handle('window-state',event=>{trusted(event);return windowState()});
+    ipcMain.handle('window-action',(event,action)=>{
+      trusted(event);
+      if(action==='minimize')window.minimize();
+      else if(action==='maximize'){if(window.isMaximized())window.unmaximize();else window.maximize()}
+      else if(action==='close')window.close();
+      else throw new Error('未知窗口操作');
     });
     ipcMain.handle('choose',async(event,kind)=>{
       trusted(event);
