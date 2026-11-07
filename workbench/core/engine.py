@@ -780,7 +780,7 @@ class Renderer:
             return canvas
         return compose(scene['ops'])
 
-    def render(self,path,settings):
+    def render(self,path,settings,scene_indices=None):
         from artwork_sources import group_members,validate_roles
         members=group_members(path)
         if members:validate_roles(self.data)
@@ -793,16 +793,17 @@ class Renderer:
                     if bounds:
                         cropped=artwork.crop(bounds);artwork.close();artwork=cropped
                 images[role]=artwork
-            yield from self._render_images(images if members else images['single'],settings,prepared)
+            yield from self._render_images(images if members else images['single'],settings,prepared,scene_indices)
         finally:
             for image in images.values():image.close()
 
-    def _render_images(self,artwork,settings,prepared):
+    def _render_images(self,artwork,settings,prepared,scene_indices=None):
         fixed_settings=(settings['fit'],settings['width'],settings['height'],settings['format'])
         if fixed_settings!=self._fixed_settings:
             self._fixed_images.clear()
             self._fixed_settings=fixed_settings
         for scene_index,scene in enumerate(self.data['scenes']):
+            if scene_indices is not None and scene_index not in scene_indices:continue
             fixed=bool(self.data.get('workbench') and scene.get('fixed'))
             if fixed and scene_index in self._fixed_images:
                 yield scene['name'],self._fixed_images[scene_index].copy()
@@ -833,6 +834,8 @@ def settings_checked(settings):
     if 'orientation' in s and s['orientation'] not in ORIENTATIONS:raise ValueError('印花方向设置无效')
     if 'rotation' in s:combined_rotation(0,s['rotation'])
     if 'fit_policy' in s and (isinstance(s['fit_policy'],bool) or s['fit_policy'] not in (1,2)):raise ValueError('图片适配版本无效')
+    if 'input_layout' in s and s['input_layout'] not in ('folders','flat'):raise ValueError('印花分组方式无效')
+    if 'input_exclude' in s and (not isinstance(s['input_exclude'],list) or len(s['input_exclude'])>100 or any(not isinstance(x,str) or len(x)>100 for x in s['input_exclude'])):raise ValueError('排除关键词无效')
     if 'naming' in s:
         from export_naming import checked_naming
         s['naming']=checked_naming(s['naming'],safe_name)

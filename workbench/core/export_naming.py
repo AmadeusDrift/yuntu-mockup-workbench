@@ -33,18 +33,21 @@ def plan_outputs(files, scenes, settings, safe_name, source_root=None):
     from artwork_sources import group_members, ROLES
     plans, folders, products, members_cache = {}, set(), {}, {}
     for offset, (path, _, _) in enumerate(files):
-        if path.parent not in members_cache:
-            members_cache[path.parent]=group_members(path.parent,allow_single=True)
-        members=members_cache[path.parent]
-        role=next((r for r,p in (members or {}).items() if p==path),None)
-        product_key=path.parent if role else path
+        role=None
+        if 'input_layout' not in settings:
+            if path.parent not in members_cache:
+                try:members_cache[path.parent]=group_members(path.parent,allow_single=True)
+                except ValueError:members_cache[path.parent]=None
+            role=next((r for r,p in (members_cache[path.parent] or {}).items() if p==path),None)
+        grouped=settings.get('input_layout')=='folders' and source_root is not None and path.parent!=Path(source_root)
+        product_key=path.parent if grouped or role else path
         if product_key not in products:products[product_key]=len(products)
-        values = dict(name=safe_name(path.parent.name if role else path.stem), index=rules['start'] + products[product_key])
+        values = dict(name=safe_name(('__'.join(path.parent.relative_to(source_root).parts) if grouped else path.parent.name) if grouped or role else path.stem), index=rules['start'] + products[product_key])
         folder = rules['folder'].format(**values)
         names = [rules['image'].format(**values, folder=folder, scene=i) + '.' + settings['format'] for i in range(1, scenes + 1)]
         if safe_name(folder) != folder or ('naming' in settings and any(safe_name(name) != name for name in names)):
             raise ValueError('导出名称过长或包含无效字符，请缩短命名规则')
-        folder = folder + '/' + ROLES[role] if role else folder
+        folder = folder + '/' + safe_name(path.stem) if grouped else folder + '/' + ROLES[role] if role else folder
         if folder.casefold() in folders or any(folder.casefold().startswith(f+'/') or f.startswith(folder.casefold()+'/') for f in folders):
             raise ValueError('发现重名产品文件夹，请在规则中加入 {index:03} 或调整原图名称')
         if len({name.casefold() for name in names}) != len(names):

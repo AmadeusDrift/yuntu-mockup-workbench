@@ -30,27 +30,41 @@ def group_members(folder, allow_single=False):
 def natural(value):
     return [int(p) if p.isdigit() else p.casefold() for p in re.split(r'(\d+)',value)]
 
-def discover(folder,extensions=EXTENSIONS):
+def discover(folder,extensions=EXTENSIONS,exclude=None):
     root=Path(folder)
     if not str(folder).strip() or not root.is_dir():raise ValueError('请选择存在的印花文件夹')
-    result=[];single_role_folders=[];groups=[]
+    excluded=['预览','参考','preview','reference'] if exclude is None else exclude
+    result=[]
+    def order(path):
+        roles=['左','中','右','left','center','right']
+        return (0,roles.index(path.stem.casefold())%3) if path.stem.casefold() in roles else (1,natural(path.name))
     def walk(directory):
-        # Never read the tool's old exported batches as new artwork.
+        if (directory/'运行状态.json').is_file():return
+        for path in sorted(directory.iterdir(),key=order):
+            if linked(path):continue
+            if path.is_dir():walk(path)
+            elif path.suffix.lower() in extensions and not any(word.casefold() in path.name.casefold() for word in excluded if word):result.append(path)
+    walk(root)
+    return result
+
+
+def legacy_discover(folder,extensions=EXTENSIONS):
+    """Keep pre-0.3.5 batch identities stable when resuming saved settings."""
+    root=Path(folder);result=[];single=[];groups=[]
+    def walk(directory):
         if (directory/'运行状态.json').is_file():return
         members=group_members(directory,allow_single=True)
         if members:
-            groups.append(directory)
-            result.extend(members[role] for role in ROLES)
-            return
+            groups.append(directory);result.extend(members[r] for r in ROLES);return
         children=sorted(directory.iterdir(),key=lambda p:natural(p.name))
-        if any(p.is_file() and p.suffix.lower() in EXTENSIONS and p.stem.casefold() in (*ROLES,*ROLES.values()) for p in children):single_role_folders.append(directory)
+        if any(p.is_file() and p.suffix.lower() in EXTENSIONS and p.stem.casefold() in (*ROLES,*ROLES.values()) for p in children):single.append(directory)
         for path in children:
             if linked(path):continue
             if path.is_dir():walk(path)
             elif path.suffix.lower() in extensions:result.append(path)
     walk(root)
     if groups:
-        for folder in single_role_folders:group_members(folder)
+        for directory in single:group_members(directory)
     return result
 
 def source_key(path,root):

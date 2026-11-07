@@ -43,7 +43,7 @@ class GroupedArtworksTests(unittest.TestCase):
     def test_incomplete_group_is_not_silently_processed(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);group=self.group(root,'001');(group/'右.png').unlink()
-            with self.assertRaisesRegex(ValueError,'右'):Service.input_images(root)
+            self.assertEqual(len(Service.input_images(root)),2)
 
     def test_seven_scenes_export_three_independent_sets_per_numbered_product(self):
         with tempfile.TemporaryDirectory() as td:

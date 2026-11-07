@@ -168,10 +168,10 @@ else {
     });
     ipcMain.handle('choose',async(event,kind)=>{
       trusted(event);
-      if(!['folder','psd','image'].includes(kind))throw new Error('选择类型无效');
+      if(!['folder','psd','image','images'].includes(kind))throw new Error('选择类型无效');
       const config=kind==='folder'?{title:'选择文件夹',properties:['openDirectory','createDirectory']}:
         kind==='psd'?{title:'选择 PSD 模板',properties:['openFile','multiSelections'],filters:[{name:'Photoshop',extensions:['psd','psb']}]}:
-        {title:'选择印花图片',properties:['openFile'],filters:[{name:'图片',extensions:['png','jpg','jpeg','tif','tiff','webp','bmp']}]};
+        {title:'选择印花图片',properties:kind==='images'?['openFile','multiSelections']:['openFile'],filters:[{name:'图片',extensions:['png','jpg','jpeg','tif','tiff','webp','bmp']}]};
       const result=await dialog.showOpenDialog(window,config);
       return {paths:result.canceled?[]:result.filePaths};
     });

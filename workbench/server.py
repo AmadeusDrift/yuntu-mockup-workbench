@@ -17,7 +17,7 @@ from service import Service
 
 
 def choose(kind):
-    if kind not in ('psd', 'folder', 'image'):
+    if kind not in ('psd', 'folder', 'image', 'images'):
         raise ValueError('选择类型无效')
     process = subprocess.run([sys.executable, '-I', '-B', str(Path(__file__).with_name('choose.py')), kind],
                              capture_output=True, encoding='utf-8')
@@ -92,6 +92,10 @@ def create_server(service, port=0):
                     result = service.configure(data['id'], data['scenes'])
                 elif route == '/api/preview':
                     result = service.preview(data['id'], data['source'], data['settings'])
+                elif route == '/api/overview':
+                    result = service.overview(data['id'],data['sources'],data['settings'],data.get('scene'))
+                elif route == '/api/save-overview':
+                    result = service.save_overview(data['folder'])
                 elif route == '/api/batch':
                     result = service.batch(data['ids'], data['input'], data['output'], data['settings'], data.get('limit', 0))
                 elif route == '/api/control':
@@ -103,7 +107,7 @@ def create_server(service, port=0):
                 elif route == '/api/remove-template':
                     result = service.remove(data['id'])
                 elif route == '/api/artworks':
-                    result = service.artworks(data['folder'], data.get('offset', 0), data.get('limit', 40))
+                    result = service.artworks(data['folder'], data.get('offset', 0), data.get('limit', 40),data.get('exclude'))
                 elif route == '/api/preferences':
                     result = service.save_preferences(data)
                 elif route == '/api/open-output':

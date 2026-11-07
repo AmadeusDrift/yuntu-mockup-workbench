@@ -172,19 +172,19 @@ class Service:
             template, folder, lambda message: self.update(message=message)))
 
     @staticmethod
-    def input_images(folder):
+    def input_images(folder, exclude=None):
         if not str(folder).strip():
             raise ValueError('请选择存在的印花文件夹')
         root = Path(folder)
         if not root.is_dir():
             raise ValueError('请选择存在的印花文件夹')
         from artwork_sources import discover
-        return discover(root,engine.EXTENSIONS)
+        return discover(root,engine.EXTENSIONS,exclude=exclude)
 
-    def artworks(self, folder, offset=0, limit=40):
+    def artworks(self, folder, offset=0, limit=40, exclude=None):
         offset=int(offset);limit=min(100,max(1,int(limit)))
         if offset<0:raise ValueError('图片分页位置不能为负数')
-        images=self.input_images(folder)
+        images=self.input_images(folder,exclude)
         files=[]
         from artwork_sources import thumbnail as source_thumbnail, signature as source_signature, source_key
         cache=self.root/'artworks'
@@ -210,7 +210,9 @@ class Service:
         for path in cached[512:]:
             if path.resolve().parent==cache.resolve() and len(path.stem)==64:
                 path.unlink(missing_ok=True)
-        return dict(folder=str(Path(folder).resolve()),total=len(images),offset=offset,files=files)
+        included=set(images)
+        excluded=[source_key(p,Path(folder)) for p in self.input_images(folder,[]) if p not in included]
+        return dict(folder=str(Path(folder).resolve()),total=len(images),offset=offset,files=files,excluded_count=len(excluded),excluded=excluded[:100])
 
     @staticmethod
     def output_directory(value, input_folder=''):
@@ -258,7 +260,7 @@ class Service:
         requested_source = str(source)
         source = Path(source)
         if source.is_dir():
-            images = self.input_images(source)
+            images = self.input_images(source,settings.get('input_exclude'))
             if not images:
                 raise ValueError('印花文件夹里没有支持的图片')
             source = images[0]
@@ -266,6 +268,8 @@ class Service:
             raise ValueError('请选择一张印花图片或印花文件夹')
         def work():
             manifest = self.manifest(template)
+            from artwork_sources import signature as artwork_signature
+            preview_stamp=list(artwork_signature(source))
             with self.cache.use(manifest):
                 renderer = engine.Renderer(manifest)
                 fit_info=[]
@@ -301,7 +305,7 @@ class Service:
                     previews.append({'name': name, 'url': f'/media/previews/{destination.name}/{i}.png'})
                     image.close()
                     self.update(progress=i + 1, total=len(renderer.data['scenes']), message='生成场景 ' + name)
-                self.update(preview=previews, preview_fit=fit_info, preview_template_id=template['id'], preview_settings=settings,
+                self.update(preview=previews, preview_signature=preview_stamp, preview_manifest=hashlib.sha256(manifest.read_bytes()).hexdigest(), preview_fit=fit_info, preview_template_id=template['id'], preview_settings=settings,
                             preview_source=requested_source, preview_scenes=[
                                 {k: s.get(k,{}) for k in ('id', 'mode', 'targets', 'artwork_roles')} for s in template['scenes']])
                 del renderer
@@ -313,13 +317,95 @@ class Service:
                     shutil.rmtree(folder)
         return self.start('preview', work)
 
+    def overview(self, ident, sources, settings, scene=None):
+        template=copy.deepcopy(self.find(ident))
+        settings=engine.settings_checked(settings)
+        if not isinstance(sources,list) or not 1<=len(sources)<=100:raise ValueError('请选择 1–100 张印花')
+        paths=list(dict.fromkeys(str(Path(p).resolve()) for p in sources))
+        if any(not Path(p).is_file() or Path(p).suffix.lower() not in engine.EXTENSIONS for p in paths):raise ValueError('所选印花已不存在或格式不支持')
+        if scene is None and len(paths)!=1:raise ValueError('整套总览一次选择一张印花')
+        scenes=[s for s in template['scenes'] if s.get('mode')!='skip']
+        if scene is not None and (isinstance(scene,bool) or not isinstance(scene,int) or scene<0 or scene>=len(scenes)):raise ValueError('请选择有效的轮播场景')
+        if scene is None and len(scenes)>100:raise ValueError('整套场景超过 100 张，请减少导出场景')
+        def work():
+            from overview import compose_sheet
+            from artwork_sources import signature
+            folder=self.root/'previews'/'overview-cache';folder.mkdir(exist_ok=True)
+            manifest=self.manifest(template)
+            manifest_digest=hashlib.sha256(manifest.read_bytes()).hexdigest()
+            items=[]
+            with self.cache.use(manifest):
+                renderer=engine.Renderer(manifest)
+                indices=list(range(len(renderer.data['scenes']))) if scene is None else [scene]
+                total=len(paths)*len(indices)
+                self.update(total=total,progress=0)
+                pixel_settings={k:v for k,v in settings.items() if k not in ('naming','input_layout','input_exclude')}
+                expected_scenes=[{k:s.get(k,{}) for k in ('id','mode','targets','artwork_roles')} for s in template['scenes']]
+                for source in paths:
+                    stamp=signature(source);targets={}
+                    with self.lock:previous=copy.deepcopy(self.task)
+                    reusable=(previous.get('preview_signature')==list(stamp) and previous.get('preview_manifest')==manifest_digest and previous.get('preview_template_id')==ident and {k:v for k,v in previous.get('preview_settings',{}).items() if k not in ('naming','input_layout','input_exclude')}==pixel_settings and previous.get('preview_source')==source and previous.get('preview_scenes')==expected_scenes)
+                    for index in indices:
+                        if self.control.stop.is_set():return
+                        key=hashlib.sha256(json.dumps([manifest_digest,str(manifest.parent),source,stamp,pixel_settings,index],sort_keys=True).encode()).hexdigest()
+                        target=folder/(key+'.png');targets[index]=target
+                        previews=previous.get('preview',[])
+                        if not target.exists() and reusable and index<len(previews):
+                            candidate=(self.root/previews[index]['url'].removeprefix('/media/')).resolve()
+                            if candidate.is_relative_to((self.root/'previews').resolve()) and candidate.is_file():
+                                from PIL import Image
+                                with Image.open(candidate) as image:image.thumbnail((900,900));image.save(target)
+                    missing=[index for index in indices if not targets[index].exists()]
+                    if missing:
+                        rendered=renderer.render(source,settings,scene_indices=missing)
+                        try:
+                            for index,(_,image) in zip(missing,rendered):
+                                try:
+                                    if self.control.stop.is_set():return
+                                    image.thumbnail((900,900));image.save(targets[index])
+                                finally:image.close()
+                                self.update(message='正在生成总览场景 '+renderer.data['scenes'][index]['name'])
+                        finally:rendered.close()
+                    if signature(source)!=stamp:
+                        for target in targets.values():target.unlink(missing_ok=True)
+                        raise ValueError('印花在生成过程中发生变化，请重新生成')
+                    for index in indices:
+                        target=targets[index];target.touch()
+                        name=('场景 '+renderer.data['scenes'][index]['name']) if scene is None else Path(source).parent.name+'/'+Path(source).name
+                        items.append((target,name));self.update(progress=len(items),message=f'正在生成总览 {len(items)}/{total}')
+                title=template['name']+(' · 整套总览' if scene is None else ' · 场景 '+renderer.data['scenes'][scene]['name']+' · 多印花总览')
+                result=folder/(uuid.uuid4().hex+'.jpg');size=compose_sheet(items,result,title)
+                self.update(overview=dict(url='/media/previews/overview-cache/'+result.name,title=title,count=len(items),width=size[0],height=size[1],template_id=ident))
+            keep={p for p,_ in items}|{result}
+            for old in sorted(folder.iterdir(),key=lambda p:p.stat().st_mtime,reverse=True)[256:]:
+                if old.is_file() and old not in keep and not old.is_symlink():old.unlink()
+        return self.start('overview',work)
+
+    def save_overview(self,folder):
+        with self.lock:
+            result=copy.deepcopy(self.task.get('overview'))
+        if not result:raise ValueError('请先生成总览图')
+        source=(self.root/result['url'].removeprefix('/media/')).resolve()
+        if not source.is_relative_to((self.root/'previews').resolve()) or not source.is_file():raise ValueError('总览图已过期，请重新生成')
+        destination=Path(folder)
+        if not destination.is_dir():raise ValueError('请选择存在的保存文件夹')
+        target=destination/('套图总览_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]+'.jpg')
+        with target.open('xb') as stream:stream.write(source.read_bytes())
+        return {'path':str(target)}
+
     def batch(self, ids, input_folder, output_folder, settings, limit=0, resume=None):
         templates = [copy.deepcopy(self.find(i)) for i in dict.fromkeys(ids)]
         if not templates:
             raise ValueError('请选择模板')
         settings = engine.settings_checked(settings)
+        if not resume:
+            settings.setdefault('input_layout','folders')
+            settings.setdefault('input_exclude',['预览','参考','preview','reference'])
         limit = int(limit)
-        images = self.input_images(input_folder)
+        if resume and 'input_layout' not in settings:
+            from artwork_sources import legacy_discover
+            images=legacy_discover(input_folder)
+        else:images = self.input_images(input_folder,settings.get('input_exclude'))
         if not images:
             raise ValueError('印花文件夹里没有支持的图片')
         if limit < 0:

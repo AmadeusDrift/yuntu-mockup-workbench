@@ -6,8 +6,9 @@ const bytes = (value) => { const n = Number(value) || 0; return n >= 1073741824 
 const activeStatuses = ['running', 'paused', 'stopping'];
 let state = {templates:[],task:{status:'idle'},cache:{},history:[],preferences:{}};
 let workflowStep=1, templateSearch='';
+let overviewSelected=new Set(), overviewScene=0, overviewOpen=false, artworkExcluded=[];
 let page = 'workbench', selectedId = '', selectedIds = new Set(), sceneDraft = new Map(), dirty = new Set();
-let input = '', output = '', source = '', settings = {width:0,height:0,ppi:72,quality:100,fit:'auto',format:'jpg',trim:false,fit_policy:2,orientation:'auto',rotation:0,naming:{folder:'{name}',image:'{scene:02}',start:1}}, limit = 0;
+let input = '', output = '', source = '', settings = {width:0,height:0,ppi:72,quality:100,fit:'auto',format:'jpg',trim:false,fit_policy:2,orientation:'auto',rotation:0,input_layout:'folders',input_exclude:['预览','参考','preview','reference'],naming:{folder:'{name}',image:'{scene:02}',start:1}}, limit = 0;
 let customSize = {width:1254,height:1254}, lastTaskSignature = '';
 let initialized = false, busyRequest = false, connected = false, catalogSignature = '', previewSignature = '', toastTimer;
 let artworkFiles = [], artworkTotal = 0, artworkOffset = 0, artworkFolder = '', artworkLoading = false, artworkError = '', artworkRequest = 0;
@@ -82,9 +83,9 @@ function renderTemplateCards() {
 function renderArtworks() {
   if(artworkLoading) return '<div class="artwork-empty" role="status">正在读取印花缩略图…</div>';
   if(artworkError) return `<div class="notice danger" role="alert">${escapeHTML(artworkError)}<button data-action="reload-artworks" data-edit>重试</button></div>`;
-  if(!input.trim()) return '<div class="artwork-empty">选择文件夹后自动读取子目录；同款左、中、右分别生成一套轮播图，归入同一个款式文件夹。</div>';
-  if(!artworkFiles.length) return '<div class="artwork-empty">文件夹中没有可用图片，请选择其他印花文件夹。</div>';
-  return `<div class="artwork-summary"><span>共 <strong>${artworkTotal}</strong> 项印花</span><small>每张印花独立套图 · 点击预览</small></div><div class="artwork-grid">${artworkFiles.map(file=>`<button class="artwork-tile ${file.path===source?'selected':''}" data-artwork="${attr(file.path)}" data-edit aria-pressed="${file.path===source}" title="${attr(file.name)}"><span class="artwork-image"><img src="${attr(file.url)}" alt="${attr(file.name)}" loading="lazy">${file.path===source?'<span class="artwork-check">✓</span>':''}</span><span class="artwork-name">${escapeHTML(file.name)}${file.kind==='triptych'?'<small>左 · 中 · 右（一套）</small>':''}</span></button>`).join('')}</div>${artworkTotal>40?`<div class="artwork-pagination"><button data-action="artworks-prev" ${artworkOffset===0?'disabled':''} data-edit>上一页</button><small>${artworkOffset+1}–${Math.min(artworkOffset+40,artworkTotal)} / ${artworkTotal}</small><button data-action="artworks-next" ${artworkOffset+40>=artworkTotal?'disabled':''} data-edit>下一页</button></div>`:''}`;
+  if(!input.trim()) return '<div class="artwork-empty">选择文件夹后自动读取子目录；支持任意名称、任意数量的印花，可按子文件夹分款。</div>';
+  if(!artworkFiles.length) return `<div class="artwork-empty">没有可用图片${artworkExcluded.length?'，部分图片已按关键词排除，请调整上方规则':'，请选择其他印花文件夹'}。</div>`;
+  return `<div class="artwork-summary"><span>共 <strong>${artworkTotal}</strong> 项印花</span><small>每张印花独立套图 · 点击预览</small></div>${artworkExcluded.length?`<details class="excluded-artworks"><summary>已按关键词排除 ${artworkExcluded.length}${artworkExcluded.length===100?'+':''} 张图片</summary><p>${artworkExcluded.map(escapeHTML).join('<br>')}</p><small>若有需要处理的图片，请修改上方排除关键词。</small></details>`:''}<div class="artwork-grid">${artworkFiles.map(file=>`<div class="artwork-choice"><label class="overview-check"><input type="checkbox" data-overview-artwork="${attr(file.path)}" ${overviewSelected.has(file.path)?'checked':''} data-edit>加入总览</label><button class="artwork-tile ${file.path===source?'selected':''}" data-artwork="${attr(file.path)}" data-edit aria-pressed="${file.path===source}" title="${attr(file.name)}"><span class="artwork-image"><img src="${attr(file.url)}" alt="${attr(file.name)}" loading="lazy">${file.path===source?'<span class="artwork-check">✓</span>':''}</span><span class="artwork-name">${escapeHTML(file.name)}${file.kind==='triptych'?'<small>左 · 中 · 右（一套）</small>':''}</span></button></div>`).join('')}</div>${artworkTotal>40?`<div class="artwork-pagination"><button data-action="artworks-prev" ${artworkOffset===0?'disabled':''} data-edit>上一页</button><small>${artworkOffset+1}–${Math.min(artworkOffset+40,artworkTotal)} / ${artworkTotal}</small><button data-action="artworks-next" ${artworkOffset+40>=artworkTotal?'disabled':''} data-edit>下一页</button></div>`:''}`;
 }
 function renderAdvanced() {
   return `<details class="advanced-settings" id="advanced-settings" ${advancedOpen?'open':''}><summary>高级设置 <small>导出尺寸、格式、图片质量</small></summary><p class="field-help">默认沿用 PSD 原尺寸。需要统一输出尺寸时，再设置宽度和高度。</p><label class="check-label"><input type="checkbox" data-original-size ${settings.width===0&&settings.height===0?'checked':''} data-edit>沿用 PSD 原始尺寸与比例</label><div class="form-grid export-settings"><label>导出宽度 · px<input type="number" min="1" max="8192" data-setting="width" data-dimension value="${settings.width||customSize.width}" data-edit></label><label>导出高度 · px<input type="number" min="1" max="8192" data-setting="height" data-dimension value="${settings.height||customSize.height}" data-edit></label><label>导出格式<select data-setting="format" data-edit>${options([['jpg','JPG'],['png','PNG']],settings.format)}</select></label><label>图片质量 · 1–100<input type="number" min="1" max="100" data-setting="quality" value="${attr(settings.quality)}" data-edit></label><label>分辨率 · PPI<input type="number" min="1" max="2400" data-setting="ppi" value="${attr(settings.ppi)}" data-edit></label><label class="span-two">本批处理上限 · 0 为全部<input type="number" min="0" data-model="limit" value="${attr(limit)}" data-edit></label></div></details>`;
@@ -114,10 +115,10 @@ function renderWorkbench() {
   <div class="studio-grid"><section class="editor-panel ${workflowStep===1?'template-editor':''}" aria-label="套图设置">
     <div class="step-panel" data-step-panel="1" ${workflowStep!==1?'hidden':''}><div class="panel-heading"><div><h2>选择套图模板</h2><p>可勾选多个模板，一起生成整批商品图。</p></div><button class="text" data-action="go-templates">管理模板</button></div>
     ${state.templates.length?`<div class="template-toolbar"><label class="search-control">${icon('search')}<input id="template-search" value="${attr(templateSearch)}" placeholder="搜索模板名称" aria-label="搜索模板名称"></label><span>${state.templates.length} 个模板</span></div>${renderTemplateCards()}<p id="template-no-match" class="field-help" hidden>没有匹配的模板，换个关键词试试。</p><p class="selection-help">勾选加入批次 · 点击缩略图切换预览</p>${template?`<details class="scene-settings" id="scene-settings" ${sceneSettingsOpen?'open':''}><summary>场景与导出顺序 <small>${escapeHTML(templateName(template))} · ${scenesFor(template).length} 个场景</small></summary>${renderScenes(template)}</details>`:''}`:empty('先导入一个 PSD 模板','导入后会自动识别场景和可替换的印花图层。',`<button class="primary" data-action="import" data-edit>${icon('plus')} 选择 PSD 文件</button>`)}</div>
-    <div class="step-panel" data-step-panel="2" ${workflowStep!==2?'hidden':''}><div class="panel-heading"><div><h2>选择印花素材</h2><p>选择一个文件夹，点击其中一张查看套图效果。</p></div></div>${pathPicker('input-path','input',input,'选择印花所在文件夹','choose-input')}<div id="artwork-browser" aria-busy="${artworkLoading}">${renderArtworks()}</div></div>
+    <div class="step-panel" data-step-panel="2" ${workflowStep!==2?'hidden':''}><div class="panel-heading"><div><h2>选择印花素材</h2><p>选择一个文件夹，点击其中一张查看套图效果。</p></div></div>${pathPicker('input-path','input',input,'选择印花所在文件夹','choose-input')}<div class="import-rules"><label>文件夹组织<select data-setting="input_layout" data-edit>${options([['folders','按子文件夹分款 · 每张印花独立一套'],['flat','每张图片单独一款']],settings.input_layout||'folders')}</select></label><label>排除文件名关键词 · 逗号分隔<input id="input-exclude" value="${attr((settings.input_exclude||[]).join('，'))}" placeholder="留空则读取所有图片" data-edit></label><small>分款模式：款式文件夹 / 印花名称 / 01、02…；根目录的散图仍各自一款。排除规则同时用于列表和批量导出。</small></div><div id="artwork-browser" aria-busy="${artworkLoading}">${renderArtworks()}</div></div>
     <div class="step-panel" data-step-panel="3" ${workflowStep!==3?'hidden':''}><div class="panel-heading"><div><h2>确认印花效果</h2><p>调整后重新生成预览，确认画面方向和印区边缘。</p></div></div>${fitControls()}<div class="placement-tip">完整放入会保留全部图案；铺满可能裁切。手动角度叠加在所选方向上，正值顺时针、负值逆时针。</div></div>
     <div class="step-panel" data-step-panel="4" ${workflowStep!==4?'hidden':''}><div class="panel-heading"><div><h2>设置批量导出</h2><p>选择保存位置，确认文件夹和图片的命名方式。</p></div></div><label class="field-label" for="output-path">保存到</label>${pathPicker('output-path','output',output,'选择套图结果保存文件夹','choose-output')}<div class="output-hint"><span>每张印花对应一套商品图</span><button data-action="open-output" ${output?'':'disabled'}>打开文件夹 ${icon('arrow')}</button></div>${renderNaming()}${renderAdvanced()}</div>
-  </section><aside class="preview-panel" aria-label="效果预览"><div class="preview-header"><div><h2>效果预览</h2><small>${template?escapeHTML(templateName(template)):'先选择一个模板'}</small></div><span class="badge">${template?scenesFor(template).filter(s=>s.mode!=='skip').length:0} 个场景</span></div><div class="preview-selected"><span class="field-label">当前印花</span><strong title="${attr(source)}">${source?escapeHTML(source.split(/[\\/]/).pop()):'还没有选择印花'}</strong><button data-action="choose-image" data-edit>${icon('image')} 另选图片</button></div>${template&&!selectedIds.has(template.id)?'<p class="preview-scope">当前预览的模板未加入本批导出，请返回第一步勾选。</p>':selectedIds.size>1?'<p class="preview-scope">这里预览当前模板。已选择多个模板，请分别点击模板检查效果。</p>':''}<div id="preview-content">${renderPreviews()}</div><div class="preview-tools"><small>点击图片放大 · 左右方向键切换</small><button data-action="preview" class="primary" data-needs-artworks data-edit>生成预览</button></div></aside></div>
+  </section><aside class="preview-panel" aria-label="效果预览"><div class="preview-header"><div><h2>效果预览</h2><small>${template?escapeHTML(templateName(template)):'先选择一个模板'}</small></div><span class="badge">${template?scenesFor(template).filter(s=>s.mode!=='skip').length:0} 个场景</span></div><div class="preview-selected"><span class="field-label">当前印花</span><strong title="${attr(source)}">${source?escapeHTML(source.split(/[\\/]/).pop()):'还没有选择印花'}</strong><button data-action="choose-image" data-edit>${icon('image')} 另选图片</button></div>${template&&!selectedIds.has(template.id)?'<p class="preview-scope">当前预览的模板未加入本批导出，请返回第一步勾选。</p>':selectedIds.size>1?'<p class="preview-scope">这里预览当前模板。已选择多个模板，请分别点击模板检查效果。</p>':''}${renderOverviewControls()}<div id="preview-content">${renderPreviews()}</div><div class="preview-tools"><small>点击图片放大 · 左右方向键切换</small><button data-action="preview" class="primary" data-needs-artworks data-edit>生成预览</button></div></aside></div>
   <footer class="workflow-footer"><div class="batch-summary" id="workflow-summary" aria-live="polite"></div><div class="workflow-actions">${workflowStep>1?`<button data-step-target="${workflowStep-1}">上一步</button>`:''}${workflowStep<4?`<button class="primary" data-next-step="${workflowStep+1}">下一步：${['','选择模板','选择印花','确认效果','批量导出'][workflowStep+1]} ${icon('arrow')}</button>`:`<button class="primary export-button" data-action="batch" data-needs-artworks data-edit>${icon('download')} 开始批量导出</button>`}</div></footer></div>`;
 }
 function filterTemplates() {
@@ -138,7 +139,7 @@ function updateWorkflow() {
 }
 function previewChanged() {
   const sceneSettings=currentTemplate()?scenesFor(currentTemplate()).map(({id,mode,targets,artwork_roles})=>({id,mode,targets,artwork_roles:artwork_roles||{}})):[];
-  return !state.task?.preview_settings || Object.entries(settings).some(([key,value])=>key!=='naming'&&JSON.stringify(state.task.preview_settings[key])!==JSON.stringify(value)) || state.task.preview_source!==(source.trim()||input.trim()) || JSON.stringify(state.task.preview_scenes)!==JSON.stringify(sceneSettings);
+  return !state.task?.preview_settings || Object.entries(settings).some(([key,value])=>!['naming','input_layout','input_exclude'].includes(key)&&JSON.stringify(state.task.preview_settings[key])!==JSON.stringify(value)) || state.task.preview_source!==(source.trim()||input.trim()) || JSON.stringify(state.task.preview_scenes)!==JSON.stringify(sceneSettings);
 }
 function options(values, selected) { return values.map(([value,label])=>`<option value="${value}" ${value===selected?'selected':''}>${label}</option>`).join(''); }
 function renderScenes(template) {
@@ -146,12 +147,19 @@ function renderScenes(template) {
   const warnings = template.warnings || [];
   return `${template.stale?'<div class="notice warning"><span>PSD 文件已有变化，请重新导入并核对场景设置。</span><button data-action="refresh-template" data-edit>重新导入</button></div>':''}${warnings.length ? `<div class="notice warning"><ul class="warning-list">${warnings.map(w=>`<li>${escapeHTML(typeof w==='string'?w:JSON.stringify(w))}</li>`).join('')}</ul></div>`:''}<p class="field-help">拖动左侧手柄调整导出顺序，保存后生效；原 PSD 不变。</p><div class="scene-list">${scenes.map((scene,index)=>`<article data-scene-id="${attr(scene.id)}" class="scene ${scene.mode==='skip'?'scene-muted':''}"><button class="scene-drag-handle" draggable="true" data-drag-scene="${attr(scene.id)}" data-edit title="拖动调整导出顺序，也可用上下方向键" aria-label="拖动场景 ${attr(scene.name)}">⠿</button><button class="scene-thumb" ${scene.thumbnail?`data-image="${attr(scene.thumbnail)}" data-title="${attr(scene.name)}"`:'disabled'} aria-label="查看 ${attr(scene.name)} 场景">${scene.thumbnail?`<img src="${attr(scene.thumbnail)}" alt="${attr(scene.name)}" loading="lazy">`:'PSD'}</button><div><div class="scene-title"><strong><small class="export-position">${scene.mode==='skip'?'不导出':'导出 '+String(scenes.slice(0,index+1).filter(s=>s.mode!=='skip').length).padStart(2,'0')}</small>场景 ${escapeHTML(scene.name)}</strong><select aria-label="${attr(scene.name)} 导出方式" data-scene-mode="${attr(scene.id)}" data-edit>${options([['replace','换图'],['fixed','固定'],['skip','不导出']],scene.mode||'replace')}</select></div><div class="scene-path">${scene.mode==='replace'?`已选 ${scene.targets?.length||0} 个印花图层`:scene.mode==='fixed'?'保留当前场景原样':'跳过此场景'}</div><details ${scene.mode==='replace'&&!(scene.targets?.length)?'open':''}><summary>印花图层 · 手动调整</summary><div class="target-list">${(scene.candidates||[]).map(candidate=>`<label><input type="checkbox" data-target-scene="${attr(scene.id)}" value="${attr(candidate.id)}" ${(scene.targets||[]).map(String).includes(String(candidate.id))?'checked':''} data-edit><span>${escapeHTML(candidate.path||candidate.name)}${candidate.linked?' · 关联图层':''}</span></label>`).join('')||'<span class="muted">没有可选的智能对象，请检查 PSD。</span>'}</div></details></div></article>`).join('')||empty('没有可用场景','请检查 PSD 或重新导入。')}</div><div class="scene-controls"><small>${dirty.has(template.id)?'<span class="unsaved">● 场景设置尚未保存</span>':'场景设置已与模板同步'}</small><button data-action="save-template" data-edit>保存场景设置</button></div>`;
 }
+function renderOverviewControls(){
+  const scenes=currentTemplate()?scenesFor(currentTemplate()).filter(s=>s.mode!=='skip'):[];
+  if(overviewScene>=scenes.length)overviewScene=0;
+  return `<div class="overview-controls"><div class="overview-actions"><button data-action="overview-set" data-edit>整套总览</button><button data-action="overview-toggle" aria-expanded="${overviewOpen}" data-edit>多印花总览 · ${overviewSelected.size} 张</button></div>${overviewOpen?`<div class="overview-options"><p>在“选择印花”勾选图片，或直接添加图片。每张印花只生成下方选定的同一个场景。</p><div class="overview-actions"><button data-action="overview-add" data-edit>添加图片</button><button data-action="overview-page" data-edit>选择当前页</button><button data-action="overview-clear" data-edit>清空</button></div><label>要对比的轮播图<select id="overview-scene" data-edit>${scenes.map((scene,index)=>`<option value="${index}" ${index===overviewScene?'selected':''}>导出 ${String(index+1).padStart(2,'0')} · ${escapeHTML(scene.name)}</option>`).join('')}</select></label><div class="overview-selected-list">${[...overviewSelected].map(path=>`<button data-overview-remove="${attr(path)}" title="${attr(path)}" data-edit>${escapeHTML(path.split(/[\\/]/).slice(-2).join('/'))} ×</button>`).join('')||'<small>尚未选择印花，最多 100 张。</small>'}</div><button class="primary" data-action="overview-many" ${overviewSelected.size?'':'disabled'} data-edit>生成总览图 · ${overviewSelected.size} 张</button></div>`:''}</div>`;
+}
 function renderPreviews() {
   const previews = state.task?.preview_template_id === selectedId ? state.task.preview || [] : [];
   const sceneSettings = currentTemplate() ? scenesFor(currentTemplate()).map(({id,mode,targets,artwork_roles})=>({id,mode,targets,artwork_roles:artwork_roles||{}})) : [];
-  const changed = (state.task?.preview_settings && Object.entries(settings).some(([key,value])=>key!=='naming'&&JSON.stringify(state.task.preview_settings[key])!==JSON.stringify(value))) || (state.task?.preview_source && state.task.preview_source !== (source.trim()||input.trim())) || (state.task?.preview_scenes && JSON.stringify(state.task.preview_scenes)!==JSON.stringify(sceneSettings));
+  const changed = (state.task?.preview_settings && Object.entries(settings).some(([key,value])=>!['naming','input_layout','input_exclude'].includes(key)&&JSON.stringify(state.task.preview_settings[key])!==JSON.stringify(value))) || (state.task?.preview_source && state.task.preview_source !== (source.trim()||input.trim())) || (state.task?.preview_scenes && JSON.stringify(state.task.preview_scenes)!==JSON.stringify(sceneSettings));
   const placement = [...new Set((state.task?.preview_fit||[]).map(info=>info.reason))].join('；');
-  return previews.length ? `${changed?'<div class="notice warning">预览参数与当前设置不同，请重新生成预览。</div>':''}${placement?`<p class="field-help preview-placement">本次预览：${escapeHTML(placement)}</p>`:''}<div class="preview-grid">${previews.map(p=>`<button class="preview-tile" data-image="${attr(p.url)}" data-title="${attr(p.name)}"><img src="${attr(p.url)}" alt="${attr(p.name)}" loading="lazy"><span>${escapeHTML(p.name)}</span></button>`).join('')}</div>` : `<div class="preview-empty"><span class="preview-symbol" aria-hidden="true">${icon('image')}</span><strong>在这里检查套图效果</strong><p>选好模板和印花后，点击“生成预览”。</p></div>`;
+  const overview=state.task?.overview;
+  const sheet=overview?.template_id===selectedId?`<div class="overview-result"><div><strong>${escapeHTML(overview.title)}</strong><button data-action="overview-save" data-edit>保存总览图</button></div><button class="overview-image" data-image="${attr(overview.url)}" data-title="${attr(overview.title)}"><img src="${attr(overview.url)}" alt="${attr(overview.title)}"></button><small>共 ${overview.count} 张 · 修改选择或参数后请重新生成</small></div>`:'';
+  return sheet + (previews.length ? `${changed?'<div class="notice warning">预览参数与当前设置不同，请重新生成预览。</div>':''}${placement?`<p class="field-help preview-placement">本次预览：${escapeHTML(placement)}</p>`:''}<div class="preview-grid">${previews.map(p=>`<button class="preview-tile" data-image="${attr(p.url)}" data-title="${attr(p.name)}"><img src="${attr(p.url)}" alt="${attr(p.name)}" loading="lazy"><span>${escapeHTML(p.name)}</span></button>`).join('')}</div>` : `<div class="preview-empty"><span class="preview-symbol" aria-hidden="true">${icon('image')}</span><strong>在这里检查套图效果</strong><p>选好模板和印花后，点击“生成预览”。</p></div>`);
 }
 function renderTemplates() {
   return heading('模板管理','将 PSD 作为模板导入，逐场景确认印花位置。', '<button class="primary" data-action="import" data-edit>＋ 导入 PSD</button>') + (state.templates.length ? `<div class="catalog-grid">${state.templates.map(t=>`<article class="card catalog-tile"><div class="catalog-cover">${t.scenes?.find(s=>s.thumbnail)?`<img src="${attr(t.scenes.find(s=>s.thumbnail).thumbnail)}" alt="${attr(t.name)} 场景缩略图" loading="lazy">`:'PSD 模板'}</div><h3>${escapeHTML(t.name)}</h3><p title="${attr(t.path)}">${escapeHTML(t.path)}</p><footer><span class="badge">${t.scenes?.length||0} 个场景</span><div class="actions"><button data-open-template="${attr(t.id)}">配置</button><button class="text error-text" data-remove-template="${attr(t.id)}" data-edit>移除</button></div></footer>${t.warnings?.length?`<p class="field-help error-text">有 ${t.warnings.length} 条扫描提示，打开配置查看。</p>`:''}</article>`).join('')}</div>` : `<section class="card">${empty('导入第一个模板','支持一次选择多个 PSD 文件，导入后会自动扫描场景和候选印花。','<button class="primary" data-action="import" data-edit>选择 PSD 文件</button>')}</section>`);
@@ -183,7 +191,7 @@ function renderTask() {
   container.innerHTML = `<section class="card task-card" aria-label="任务进度"><header><div class="task-status"><h2>${task.kind==='scan'?'扫描模板':task.kind==='preview'?'生成预览':'当前任务'}</h2><span class="badge ${task.status==='failed'?'failed':task.status==='done'?'success':task.status==='running'?'uploading':''}">${statusLabel(task.status)}</span></div><small>${total?`${Math.round(progress/total*100)}%`:active?'请稍候':''}</small></header><div class="task-body"><p class="task-message ${task.error?'error-text':''}" role="status">${escapeHTML(task.error||task.message||statusLabel(task.status))}</p><div class="task-meter"><progress max="${total||1}" ${total||!active?`value="${total?Math.min(progress,total):task.status==='done'?1:0}"`:''} aria-label="任务进度"></progress><small>${progress} / ${total||'—'}</small></div><div class="task-footer"><small>${task.status==='paused'?'任务已暂停，点击继续可接着处理。':task.status==='stopping'?'正在结束当前处理，请等待。':active?'处理期间，模板和导出参数暂时锁定。':'任务记录保留在本次会话中。'}</small><div class="actions">${task.status==='running'&&task.kind==='batch'?'<button data-control="pause">暂停</button>':''}${task.status==='paused'?'<button data-control="resume" class="primary">继续</button>':''}${['running','paused'].includes(task.status)?'<button data-control="stop" class="danger-outline">停止</button>':''}</div></div>${task.results?.length?`<details class="results-detail"><summary>查看处理结果 · ${task.results.length} 项</summary><ul>${task.results.slice(-100).map(r=>`<li>${escapeHTML(typeof r==='string'?r:r.message||r.path||r.output||r.name||JSON.stringify(r))}</li>`).join('')}</ul></details>`:''}</div></section>`;
 }
 function updateLocks() {
-  document.querySelectorAll('[data-edit]').forEach(element => { element.disabled = blocked() || (element.hasAttribute('data-dimension') && settings.width===0 && settings.height===0) || (element.hasAttribute('data-needs-artworks') && artworkLoading) || (element.dataset.action==='artworks-prev' && (artworkLoading || artworkOffset===0)) || (element.dataset.action==='artworks-next' && (artworkLoading || artworkOffset+40>=artworkTotal)) || (element.hasAttribute('data-resume') && !historyPath(state.history[Number(element.dataset.resume)]||{})); });
+  document.querySelectorAll('[data-edit]').forEach(element => { element.disabled = blocked() || (element.dataset.action==='overview-many'&&!overviewSelected.size) || (element.dataset.action==='overview-set'&&!source) || (element.hasAttribute('data-dimension') && settings.width===0 && settings.height===0) || (element.hasAttribute('data-needs-artworks') && artworkLoading) || (element.dataset.action==='artworks-prev' && (artworkLoading || artworkOffset===0)) || (element.dataset.action==='artworks-next' && (artworkLoading || artworkOffset+40>=artworkTotal)) || (element.hasAttribute('data-resume') && !historyPath(state.history[Number(element.dataset.resume)]||{})); });
   document.querySelectorAll('[data-control]').forEach(element => { element.disabled = busyRequest; });
   updateWorkflow();
 }
@@ -244,15 +252,15 @@ function savePreferences() {
 async function loadArtworks(offset=0, resetSource=false) {
   const token=++artworkRequest, folder=input.trim();
   artworkOffset=offset; artworkFolder=folder; artworkError=''; artworkLoading=!!folder;
-  artworkFiles=[]; if(offset===0)artworkTotal=0;
-  if(resetSource)source='';
+  artworkFiles=[]; artworkExcluded=[]; if(offset===0)artworkTotal=0;
+  if(resetSource){source='';overviewSelected.clear();}
   const paint=()=>{if($('#artwork-browser')) { $('#artwork-browser').innerHTML=renderArtworks(); $('#artwork-browser').setAttribute('aria-busy',String(artworkLoading)); } updateLocks();};
   paint();
   if(!folder) { renderPage(); return; }
   try {
-    const data=await request('/api/artworks',{folder,offset,limit:40});
+    const data=await request('/api/artworks',{folder,offset,limit:40,exclude:settings.input_exclude});
     if(token!==artworkRequest || input.trim()!==folder)return;
-    artworkFiles=data.files||[]; artworkTotal=data.total||0; artworkOffset=data.offset??offset;
+    artworkFiles=data.files||[]; artworkExcluded=data.excluded||[]; artworkTotal=data.total||0; artworkOffset=data.offset??offset;
     if(!source && artworkFiles.length)source=artworkFiles[0].path;
   } catch(error) { if(token!==artworkRequest)return; artworkError=error.message; }
   finally { if(token===artworkRequest) { artworkLoading=false; renderPage(); } }
@@ -266,6 +274,17 @@ async function handleAction(name) {
   }
   if (blocked()) return;
   try {
+    if(name==='overview-toggle'){overviewOpen=!overviewOpen;renderPage();}
+    if(name==='overview-add'){const paths=await choose('images');if(overviewSelected.size+paths.length>100)throw new Error('一次最多选择 100 张印花');paths.forEach(p=>overviewSelected.add(p));overviewOpen=true;renderPage();}
+    if(name==='overview-clear'){overviewSelected.clear();renderPage();}
+    if(name==='overview-page'){if(new Set([...overviewSelected,...artworkFiles.map(f=>f.path)]).size>100)throw new Error('一次最多选择 100 张印花');artworkFiles.forEach(f=>overviewSelected.add(f.path));renderPage();}
+    if(name==='overview-set'||name==='overview-many'){
+      validateSettings();if(!selectedId)throw new Error('请先选择模板');if(dirty.has(selectedId))throw new Error('请先保存场景设置');
+      const sources=name==='overview-set'?[source]:[...overviewSelected];
+      if(!sources.length||sources.some(p=>!p))throw new Error('请先选择印花图片');
+      await action('/api/overview',{id:selectedId,sources,settings,scene:name==='overview-set'?null:overviewScene},'正在生成总览图');
+    }
+    if(name==='overview-save'){const paths=await choose('folder');if(paths.length){const result=await request('/api/save-overview',{folder:paths[0]});notify('总览图已保存：'+result.path);}}
     if (name==='import') { const paths=await choose('psd'); if(paths.length) await action('/api/scan',{paths},'开始扫描 PSD 模板'); }
     if (name==='refresh-template') { const template=currentTemplate(); if(template) await action('/api/scan',{paths:[template.path]},'开始重新扫描模板'); }
     if (name==='choose-input'||name==='choose-output') { const paths=await choose('folder'); if(paths.length) { if(name==='choose-input') { input=paths[0]; renderPage(); await loadArtworks(0,true); } else { output=paths[0]; renderPage(); } savePreferences(); } }
@@ -303,6 +322,7 @@ app.addEventListener('click', async (event)=> {
   else if(button.dataset.action) await handleAction(button.dataset.action);
   else if(button.dataset.control) await action('/api/control',{action:button.dataset.control});
   else if(button.dataset.configureTemplate) { selectedId=button.dataset.configureTemplate; renderPage(); }
+  else if(button.dataset.overviewRemove){overviewSelected.delete(button.dataset.overviewRemove);renderPage();}
   else if(button.dataset.artwork) { source=button.dataset.artwork; renderPage(); }
   else if(button.dataset.openTemplate) { selectedId=button.dataset.openTemplate; workflowStep=1; sceneSettingsOpen=true; page='workbench'; renderShell(); }
   else if(button.dataset.removeTemplate) {
@@ -335,6 +355,9 @@ app.addEventListener('change',(event)=> {
     renderPage();savePreferences();
   }
   if(field.hasAttribute('data-original-size')) { if(field.checked)customSize={width:settings.width,height:settings.height}; settings.width=field.checked?0:customSize.width; settings.height=field.checked?0:customSize.height; renderPage(); savePreferences(); }
+  if(field.dataset.overviewArtwork){if(field.checked){if(overviewSelected.size>=100){field.checked=false;notify('一次最多选择 100 张印花',true);return;}overviewSelected.add(field.dataset.overviewArtwork);}else overviewSelected.delete(field.dataset.overviewArtwork);renderPage();}
+  if(field.id==='overview-scene')overviewScene=Number(field.value);
+  if(field.id==='input-exclude'){settings.input_exclude=field.value.split(/[,，]/).map(s=>s.trim()).filter(Boolean);overviewSelected.clear();loadArtworks(0,true);savePreferences();}
   if(field.id==='template-select') { selectedId=field.value; renderPage(); }
   if(field.dataset.selectTemplate) { if(field.checked)selectedIds.add(field.dataset.selectTemplate);else selectedIds.delete(field.dataset.selectTemplate); renderPage(); }
   if(field.dataset.model==='input' && input.trim()!==artworkFolder)loadArtworks(0,true);
@@ -385,13 +408,13 @@ $('#image-dialog').addEventListener('keydown',event=>{
 async function refresh() {
   try {
     const next=await request('/api/state');
-    const oldStatus=state.task?.status, wasConnected=connected;
+    const oldStatus=state.task?.status, oldOverview=state.task?.overview?.url, wasConnected=connected;
     state={...next,templates:next.templates||[],task:next.task||{status:'idle'},cache:next.cache||{},history:next.history||[]};
     connected=true;
     const firstLoad=!initialized;
     if(firstLoad) { const pref=state.preferences||{}; input=pref.input||'';output=pref.output||'';settings={...settings,...pref.settings,fit_policy:2};limit=pref.limit||0; if(settings.width&&settings.height)customSize={width:settings.width,height:settings.height}; initialized=true; }
     const signature=JSON.stringify([state.templates,state.history,state.cache]);
-    const previews=JSON.stringify([state.task.preview,state.task.preview_template_id,state.task.preview_settings]);
+    const previews=JSON.stringify([state.task.preview,state.task.preview_template_id,state.task.preview_settings,state.task.overview]);
     const available=new Set(state.templates.map(t=>t.id));
     selectedIds=new Set([...selectedIds].filter(id=>available.has(id)));
     if(!available.has(selectedId)) { selectedId=state.templates[0]?.id||'';if(selectedId)selectedIds.add(selectedId); }
@@ -401,6 +424,7 @@ async function refresh() {
       const editing=draggedScene||document.activeElement?.matches('input,select,summary');
       if(signature!==catalogSignature&&!editing) { renderPage(); catalogSignature=signature; }
       if(previews!==previewSignature&&$('#preview-content')){$('#preview-content').innerHTML=renderPreviews();updateWorkflow();}
+      if(state.task.kind==='overview'&&state.task.status==='done'&&state.task.overview?.url!==oldOverview){overviewOpen=false;renderPage();}
       if(oldStatus!==state.task.status)updateLocks();
     }
     previewSignature=previews;

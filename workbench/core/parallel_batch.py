@@ -28,9 +28,11 @@ def sha256(path):
         for block in iter(lambda:stream.read(1024*1024),b''): digest.update(block)
     return digest.hexdigest()
 
-def input_snapshot(folder,extensions,limit):
+def input_snapshot(folder,extensions,limit,exclude=None,legacy=False):
     if limit<0: raise ValueError('测试数量不能为负数')
-    rows=[(path,*signature(path)) for path in discover(folder,extensions)]
+    from artwork_sources import legacy_discover
+    paths=legacy_discover(folder,extensions) if legacy else discover(folder,extensions,exclude=exclude)
+    rows=[(path,*signature(path)) for path in paths]
     return rows[:limit] if limit else rows
 
 def prepare_product(renderer,source,local_dir,settings,expected_signature):
@@ -225,8 +227,8 @@ def run_batch(api,manifest,input_folder,output_folder,settings,limit=0,resume=No
     if isinstance(workers,bool) or not isinstance(workers,int) or workers not in (1,2): raise ValueError('并行套数只能为1或2。')
     settings=api.settings_checked(settings);control=control or api.Control()
     source=Path(input_folder).resolve()
-    files=input_snapshot(source,api.EXTENSIONS,limit)
-    if not files: raise ValueError('输入文件夹中没有支持的图片或完整的三联画文件夹')
+    files=input_snapshot(source,api.EXTENSIONS,limit,settings.get('input_exclude'),legacy='input_layout' not in settings)
+    if not files: raise ValueError('输入文件夹中没有可处理的印花图片')
     from export_naming import plan_outputs
     plans=plan_outputs(files,len(json.loads(Path(manifest).read_text(encoding='utf-8'))['scenes']),settings,api.safe_name,source_root=source)
     identity={'template_hash':hashlib.sha256(Path(manifest).read_bytes()).hexdigest(),'input':str(source),
