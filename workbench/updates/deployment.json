@@ -8,7 +8,7 @@
   "compatibility_date": "2026-11-05",
   "manifest_url": "https://taotu.htcerp.app/updates/stable/latest.json",
   "desktop_client_status": "implemented-0.3.1",
-  "published_release": "0.3.2",
+  "published_release": "0.3.3",
   "verified_on": "2026-11-07 Asia/Shanghai",
   "compatibility_flags": [
     "nodejs_compat"
