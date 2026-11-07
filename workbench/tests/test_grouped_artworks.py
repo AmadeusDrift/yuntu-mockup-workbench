@@ -34,16 +34,35 @@ class GroupedArtworksTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);source=root/'input';source.mkdir()
             g10=self.group(source,'010');g2=self.group(source,'002')
-            self.assertEqual(Service.input_images(source),[g2,g10])
+            self.assertEqual(Service.input_images(source),[g/ (r+'.png') for g in (g2,g10) for r in ('左','中','右')])
             listing=Service(root/'data').artworks(source)
-            self.assertEqual(listing['total'],2)
-            self.assertEqual(listing['files'][0]['kind'],'triptych')
-            self.assertEqual(listing['files'][0]['name'],'002')
+            self.assertEqual(listing['total'],6)
+            self.assertEqual(listing['files'][0]['kind'],'image')
+            self.assertEqual(listing['files'][0]['name'],'002/左.png')
 
     def test_incomplete_group_is_not_silently_processed(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);group=self.group(root,'001');(group/'右.png').unlink()
             with self.assertRaisesRegex(ValueError,'右'):Service.input_images(root)
+
+    def test_seven_scenes_export_three_independent_sets_per_numbered_product(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);src=root/'input';src.mkdir();out=root/'output';out.mkdir()
+            self.group(src,'002');self.group(src,'010');manifest=self.manifest(root)
+            data=json.loads(manifest.read_text())
+            scene=data['scenes'][0]
+            for op in scene['ops']:op.pop('artwork_role',None)
+            data['scenes']=[dict(scene,name=str(i)) for i in range(1,8)]
+            manifest.write_text(json.dumps(data))
+            settings=dict(width=0,height=0,ppi=72,quality=95,fit='stretch',format='png',naming=dict(folder='{index:03}',image='{scene:02}',start=5))
+            dest,state=engine.batch(manifest,src,out,settings)
+            for number in ('005','006'):
+                for role,color in [('左',(255,0,0)),('中',(0,128,0)),('右',(0,0,255))]:
+                    files=sorted((dest/number/role).glob('*.png'))
+                    self.assertEqual([p.name for p in files],[f'{i:02}.png' for i in range(1,8)])
+                    for file in files:
+                        with Image.open(file) as image:self.assertEqual(image.getpixel((10,10))[:3],color)
+            self.assertEqual(len(list(dest.rglob('*.png'))),42)
 
     def test_three_same_size_slots_use_different_artworks_and_resume(self):
         with tempfile.TemporaryDirectory() as td:
@@ -51,12 +70,13 @@ class GroupedArtworksTests(unittest.TestCase):
             self.group(src,'002');self.group(src,'010');manifest=self.manifest(root)
             settings=engine.settings_checked(dict(width=0,height=0,ppi=72,quality=95,fit='stretch',format='png',naming=dict(folder='{name}',image='{scene:02}',start=1)))
             dest,state=engine.batch(manifest,src,out,settings)
-            self.assertEqual(set(state['records']),{'002','010'})
-            with Image.open(dest/'002/01.png') as result:
-                self.assertEqual([result.getpixel((x,10))[:3] for x in (10,30,50)],[(255,0,0),(0,128,0),(0,0,255)])
-            before=(dest/'002/01.png').stat().st_mtime_ns
+            self.assertEqual(set(state['records']),{g+'/'+r+'.png' for g in ('002','010') for r in ('左','中','右')})
+            for role,color in [('左',(255,0,0)),('中',(0,128,0)),('右',(0,0,255))]:
+                with Image.open(dest/f'002/{role}/01.png') as result:
+                    self.assertEqual([result.getpixel((x,10))[:3] for x in (10,30,50)],[color]*3)
+            before=(dest/'002/左/01.png').stat().st_mtime_ns
             engine.batch(manifest,src,out,settings,resume=dest)
-            self.assertEqual((dest/'002/01.png').stat().st_mtime_ns,before)
+            self.assertEqual((dest/'002/左/01.png').stat().st_mtime_ns,before)
             Image.new('RGB',(21,20),'white').save(src/'002/中.png')
             with self.assertRaisesRegex(ValueError,'不能继续'):engine.batch(manifest,src,out,settings,resume=dest)
 

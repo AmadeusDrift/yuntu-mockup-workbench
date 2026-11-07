@@ -33,11 +33,15 @@ def natural(value):
 def discover(folder,extensions=EXTENSIONS):
     root=Path(folder)
     if not str(folder).strip() or not root.is_dir():raise ValueError('请选择存在的印花文件夹')
-    result=[];single_role_folders=[]
+    result=[];single_role_folders=[];groups=[]
     def walk(directory):
         # Never read the tool's old exported batches as new artwork.
         if (directory/'运行状态.json').is_file():return
-        if group_members(directory,allow_single=True):result.append(directory);return
+        members=group_members(directory,allow_single=True)
+        if members:
+            groups.append(directory)
+            result.extend(members[role] for role in ROLES)
+            return
         children=sorted(directory.iterdir(),key=lambda p:natural(p.name))
         if any(p.is_file() and p.suffix.lower() in EXTENSIONS and p.stem.casefold() in (*ROLES,*ROLES.values()) for p in children):single_role_folders.append(directory)
         for path in children:
@@ -45,7 +49,7 @@ def discover(folder,extensions=EXTENSIONS):
             if path.is_dir():walk(path)
             elif path.suffix.lower() in extensions:result.append(path)
     walk(root)
-    if any(p.is_dir() for p in result):
+    if groups:
         for folder in single_role_folders:group_members(folder)
     return result
 

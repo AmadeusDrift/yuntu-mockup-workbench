@@ -112,11 +112,21 @@ def copy_validated(file,target):
 def publish_product(prepared,dest,source_name,record_before,journal,state,safe_name,naming=None):
     """Upload a complete local set; atomically expose a new SKU directory."""
     stem=naming['folder'] if naming else safe_name(Path(source_name).stem);product=dest/stem
+    relative=Path(stem)
+    if relative.is_absolute() or len(relative.parts) not in (1,2) or any(safe_name(part)!=part or part in ('.','..') for part in relative.parts):
+        raise ValueError('产品输出路径无效。')
+    current=dest
+    for part in relative.parts:
+        current=current/part
+        if current.is_symlink() or (hasattr(current,'is_junction') and current.is_junction()):
+            raise ValueError('产品输出路径不能是链接。')
+    if not product.resolve().is_relative_to(dest.resolve()):raise ValueError('产品输出路径超出批次目录。')
+    product.parent.mkdir(parents=True,exist_ok=True)
     names=naming['files'] if naming else [f'{stem}_{file["index"]:02d}.{prepared["format"]}' for file in prepared['files']]
     if product.exists():
         if not product.is_dir() or product.is_symlink() or (hasattr(product,'is_junction') and product.is_junction()):
             raise ValueError('已有产品输出路径类型无效，未覆盖。')
-        if product.resolve().parent!=dest.resolve(): raise ValueError('已有产品输出路径超出批次目录。')
+        if not product.resolve().is_relative_to(dest.resolve()): raise ValueError('已有产品输出路径超出批次目录。')
         allowed=set(names)|{name+'.part' for name in names}
         if any(not path.is_file() or path.name not in allowed for path in product.iterdir()):
             raise ValueError('产品目录含非本批次预期的文件，未覆盖，请检查后继续。')
