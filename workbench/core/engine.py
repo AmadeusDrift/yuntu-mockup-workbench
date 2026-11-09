@@ -518,6 +518,16 @@ def load_image(path,preserve_alpha=False):
         return rgb
 
 
+def adjust_artwork_brightness(artwork, amount):
+    """Lift or lower the midtones while preserving alpha and near-white padding."""
+    white_edge = 249
+    curve = []
+    for value in range(256):
+        position = min(value, white_edge) / white_edge
+        curve.append(round(value + amount * 4 * position * (1 - position)))
+    return artwork.point(curve * 3 + list(range(256)))
+
+
 def auto_fit_info(im,size,policy=2):
     """Explain geometric placement for one artwork and one native print area."""
     alpha=im.getchannel('A') if im.mode=='RGBA' else im.convert('RGBA').getchannel('A')
@@ -665,6 +675,88 @@ def fit_image(im,size,mode,preserve_alpha=False,policy=2,orientation='original',
     return canvas
 
 
+def placement_values(settings=None):
+    settings=settings or {}
+    values=[]
+    for key,default,low,high in (('scale',100,10,300),('offset_x',0,-100,100),('offset_y',0,-100,100)):
+        value=settings.get(key,default)
+        if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not low<=value<=high:
+            raise ValueError(f'{key} 请填写 {low}～{high} 的数字')
+        values.append(value)
+    return tuple(values)
+
+
+def prepare_placement_artwork(artwork,size,mode,fit_policy=2,orientation='original',rotation=0):
+    """Return uncropped artwork and Canvas-style source-to-native affine geometry."""
+    im=artwork.convert('RGBA') if artwork.mode!='RGBA' else artwork
+    if mode=='cover_bleed':im=prepare_cover_artwork(im)
+    angle=orientation_info(im,size,orientation,rotation)['rotation'] if orientation!='original' or rotation else 0
+    if angle in (0,90,180,270):
+        im=rotate_artwork(im,angle);angle=0
+    preserve_alpha=mode=='auto'
+    if mode=='auto':
+        info=auto_fit_info(im,size,policy=fit_policy)
+        if info['has_alpha']:im=im.crop(info['bounds'])
+        mode=info['mode']
+    w,h=im.size;tw,th=size
+    c=math.cos(math.radians(angle));s=math.sin(math.radians(angle))
+    if angle:
+        if mode in ('cover','cover_bleed'):
+            sx=sy=max((abs(c)*tw+abs(s)*th)/w,(abs(s)*tw+abs(c)*th)/h)*(1.01 if mode=='cover_bleed' else 1)
+        elif mode=='contain':sx=sy=min(tw/(abs(c)*w+abs(s)*h),th/(abs(s)*w+abs(c)*h))
+        elif mode=='stretch':sx=tw/(abs(c)*w+abs(s)*h);sy=th/(abs(s)*w+abs(c)*h)
+        else:raise ValueError('适配方式无效')
+        a,b,cc,d=sx*c,sy*s,-sx*s,sy*c
+        x=tw/2-a*w/2-cc*h/2;y=th/2-b*w/2-d*h/2
+    else:
+        if mode=='cover_bleed':
+            scale=max(tw/w,th/h)*1.01
+            rw=max(tw,math.ceil(w*scale));rh=max(th,math.ceil(h*scale))
+            x=-((rw-tw)//2);y=-((rh-th)//2)
+        elif mode=='cover':
+            scale=max(tw/w,th/h);rw=w*scale;rh=h*scale
+            x=(tw-rw)/2;y=(th-rh)/2
+        elif mode=='contain':
+            # Match Pillow's integer contain geometry, without allocating it.
+            rw,rh=w,h
+            if w/h!=tw/th:
+                if w/h>tw/th:rw=tw;rh=round(h/w*tw)
+                else:rh=th;rw=round(w/h*th)
+            else:rw,rh=tw,th
+            rw=max(1,rw);rh=max(1,rh)
+            x=(tw-rw)//2;y=(th-rh)//2
+        elif mode=='stretch':rw,rh=tw,th;x=y=0
+        else:raise ValueError('适配方式无效')
+        a,b,cc,d=rw/w,0,0,rh/h
+    corners=[(a*u+cc*v+x,b*u+d*v+y) for u,v in ((0,0),(w,0),(w,h),(0,h))]
+    left=min(p[0] for p in corners);top=min(p[1] for p in corners)
+    return im,dict(affine=[a,b,cc,d,x,y],x=left,y=top,
+        width=max(p[0] for p in corners)-left,height=max(p[1] for p in corners)-top,
+        rotation=angle,mode=mode,preserve_alpha=preserve_alpha)
+
+
+def fit_placed_artwork(artwork,size,mode,placement,fit_policy=2,orientation='original',rotation=0,preserve_alpha=False):
+    scale,dx,dy=placement_values(placement);scale/=100
+    image,layout=prepare_placement_artwork(artwork,size,mode,fit_policy,orientation,rotation)
+    a,b,c,d,x,y=layout['affine'];tw,th=size
+    a*=scale;b*=scale;c*=scale;d*=scale
+    x=tw/2+(x-tw/2)*scale+tw*dx/100
+    y=th/2+(y-th/2)*scale+th*dy/100
+    det=a*d-b*c
+    matrix=(d/det,-c/det,(c*y-d*x)/det,-b/det,a/det,(b*x-a*y)/det)
+    # Bound allocations to the input image and final native plane, even for
+    # extreme panoramas or 300% placement. Low-pass before affine downsampling.
+    ia,ib,_,id_,ie,_=matrix
+    rx=min(1,1/math.hypot(ia,ib));ry=min(1,1/math.hypot(id_,ie))
+    if rx<1 or ry<1:
+        w,h=image.size
+        reduced=(max(1,math.ceil(w*rx)),max(1,math.ceil(h*ry)))
+        image=image.resize(reduced,Image.Resampling.LANCZOS)
+        matrix=tuple(value*(reduced[0]/w if index<3 else reduced[1]/h) for index,value in enumerate(matrix))
+    fill='white' if layout['mode']=='contain' and not (preserve_alpha or layout['preserve_alpha']) else (0,0,0,0)
+    return image.transform(size,Image.Transform.AFFINE,matrix,Image.Resampling.BICUBIC,fillcolor=fill)
+
+
 class Renderer:
     def __init__(self, manifest):
         self.path=Path(manifest)
@@ -699,8 +791,9 @@ class Renderer:
                     self._static_layers[id(op)]=(apply_opacity(layer,op.get('opacity',255)),shadow_image(layer,shadow))
         for scene in self.data['scenes']:walk(scene['ops'])
 
-    def render_scene(self,scene,artwork,mode,prepared,fit_policy=2,orientation='original',rotation=0):
+    def render_scene(self,scene,artwork,mode,prepared,fit_policy=2,orientation='original',rotation=0,placement=None):
         size=(scene['width'],scene['height'])
+        placed=placement_values(placement)!=(100,0,0)
         def compose(ops,initial=None,region=None):
             from blend_modes import composite_rgba
             local_size=(region[2]-region[0],region[3]-region[1]) if region else size
@@ -743,6 +836,12 @@ class Renderer:
                     slot_artwork=artwork[role] if isinstance(artwork,dict) else artwork
                     slot_prepared=prepared.setdefault(('role',role),{}) if isinstance(artwork,dict) else prepared
                     stage_size=tuple(op['native_size'])
+                    if placed:
+                        placement_key=('placement',stage_size,placement_values(placement),mode,fit_policy,orientation,rotation)
+                        if placement_key not in slot_prepared:
+                            slot_prepared[placement_key]=fit_placed_artwork(slot_artwork,stage_size,mode,placement,
+                                fit_policy,orientation,rotation,preserve_alpha=bool(self.data.get('workbench')))
+                        stage_size=placement_key
                     if stage_size not in slot_prepared:
                         working=slot_artwork
                         if mode=='cover_bleed':
@@ -790,6 +889,7 @@ class Renderer:
         members=group_members(path)
         if members:validate_roles(self.data)
         images={};prepared={}
+        brightness = settings.get('brightness', 0)
         try:
             for role,item in (members or {'single':path}).items():
                 artwork=load_image(item,preserve_alpha=settings['fit'] in ('auto','cover_bleed'))
@@ -797,6 +897,10 @@ class Renderer:
                     bounds=artwork.getchannel('A').getbbox()
                     if bounds:
                         cropped=artwork.crop(bounds);artwork.close();artwork=cropped
+                if brightness:
+                    adjusted = adjust_artwork_brightness(artwork, brightness)
+                    artwork.close()
+                    artwork = adjusted
                 images[role]=artwork
             yield from self._render_images(images if members else images['single'],settings,prepared,scene_indices)
         finally:
@@ -813,7 +917,7 @@ class Renderer:
             if fixed and scene_index in self._fixed_images:
                 yield scene['name'],self._fixed_images[scene_index].copy()
                 continue
-            im=self.render_scene(scene,artwork,settings['fit'],prepared,fit_policy=settings.get('fit_policy',1),orientation=settings.get('orientation','original'),rotation=settings.get('rotation',0))
+            im=self.render_scene(scene,artwork,settings['fit'],prepared,fit_policy=settings.get('fit_policy',1),orientation=settings.get('orientation','original'),rotation=settings.get('rotation',0),placement=settings)
             target=(settings['width'],settings['height'])
             if target!=(0,0):
                 fitted=ImageOps.contain(im,target,Image.Resampling.BICUBIC)
@@ -831,6 +935,7 @@ class Renderer:
 
 def settings_checked(settings):
     s=dict(settings)
+    placement_values(s)
     for key in ('width','height','ppi','quality'):s[key]=int(s[key])
     if (s['width'],s['height'])!=(0,0) and (min(s['width'],s['height'])<16 or max(s['width'],s['height'])>8192 or s['width']*s['height']>32_000_000):
         raise ValueError('输出尺寸：两项都填 0 表示沿用 PSD，或填写 16～8192 的像素尺寸（不超过 3200 万像素）')
@@ -838,6 +943,10 @@ def settings_checked(settings):
     if s['fit'] not in MODES or s['format'] not in ('jpg','png'):raise ValueError('输出设置无效')
     if 'orientation' in s and s['orientation'] not in ORIENTATIONS:raise ValueError('印花方向设置无效')
     if 'rotation' in s:combined_rotation(0,s['rotation'])
+    if 'brightness' in s:
+        value = s['brightness']
+        if type(value) is not int or not -30 <= value <= 30:
+            raise ValueError('印花亮度范围为 -30～30 的整数')
     if 'fit_policy' in s and (isinstance(s['fit_policy'],bool) or s['fit_policy'] not in (1,2)):raise ValueError('图片适配版本无效')
     if 'input_layout' in s and s['input_layout'] not in ('folders','flat'):raise ValueError('印花分组方式无效')
     if 'input_exclude' in s and (not isinstance(s['input_exclude'],list) or len(s['input_exclude'])>100 or any(not isinstance(x,str) or len(x)>100 for x in s['input_exclude'])):raise ValueError('排除关键词无效')

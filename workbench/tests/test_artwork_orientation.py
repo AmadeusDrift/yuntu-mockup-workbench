@@ -15,6 +15,38 @@ def landscape():
 
 
 class ArtworkOrientationTests(unittest.TestCase):
+    def test_print_brightness_is_shared_by_scenes_and_preserves_static_pixels(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            original = Image.new('RGBA', (16, 16), (115, 120, 125, 255))
+            original.paste((255, 255, 255, 255), (12, 0, 16, 16))
+            original.save(root/'art.png')
+            Image.new('RGBA', (48, 24), (226, 213, 201, 255)).save(root/'wall.png')
+            scenes = []
+            for number, x in enumerate((4, 24), 1):
+                quad = [[x, 4], [x+16, 4], [x+16, 20], [x, 20]]
+                if number == 2:
+                    quad = [quad[1], quad[0], quad[3], quad[2]]
+                scenes.append(dict(name=str(number), width=48, height=24, ops=[
+                    dict(kind='static', asset='wall.png'),
+                    dict(kind='slot', native_size=[16, 16], quad=quad, opacity=255)]))
+            manifest = root/'template.json'
+            manifest.write_text(json.dumps(dict(version=4, workbench=True, scenes=scenes)))
+            renderer = engine.Renderer(manifest)
+            settings = dict(fit='contain', width=0, height=0, format='png')
+            before = dict(renderer.render(root/'art.png', settings))
+            neutral = dict(renderer.render(root/'art.png', dict(settings, brightness=0)))
+            brighter = dict(renderer.render(root/'art.png', dict(settings, brightness=15)))
+            darker = dict(renderer.render(root/'art.png', dict(settings, brightness=-15)))
+            for name, middle, white in [('1', (9, 10), (18, 10)), ('2', (34, 10), (25, 10))]:
+                self.assertEqual(before[name].tobytes(), neutral[name].tobytes())
+                self.assertGreater(brighter[name].getpixel(middle)[0], before[name].getpixel(middle)[0])
+                self.assertLess(darker[name].getpixel(middle)[0], before[name].getpixel(middle)[0])
+                self.assertEqual(brighter[name].getpixel(white), before[name].getpixel(white))
+                self.assertEqual(brighter[name].getpixel((0, 0)), before[name].getpixel((0, 0)))
+            with Image.open(root/'art.png') as saved:
+                self.assertEqual(saved.tobytes(), original.tobytes())
+
     def test_auto_turns_landscape_upright_before_fitting_without_losing_sides(self):
         result=engine.fit_image(landscape(),(80,160),'cover',orientation='auto')
         self.assertEqual(result.getpixel((40,20)),(255,0,0,255))

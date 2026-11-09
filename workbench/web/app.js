@@ -8,11 +8,12 @@ let state = {templates:[],task:{status:'idle'},cache:{},history:[],preferences:{
 let workflowStep=1, templateSearch='';
 let overviewSelected=new Set(), overviewScene=0, overviewOpen=false, artworkExcluded=[];
 let page = 'workbench', selectedId = '', selectedIds = new Set(), sceneDraft = new Map(), dirty = new Set();
-let input = '', output = '', source = '', settings = {width:0,height:0,ppi:72,quality:100,fit:'auto',format:'jpg',trim:false,fit_policy:2,orientation:'auto',rotation:0,input_layout:'folders',input_exclude:['预览','参考','preview','reference'],naming:{folder:'{name}',image:'{scene:02}',start:1}}, limit = 0;
+let input = '', output = '', source = '', settings = {width:0,height:0,ppi:72,quality:100,fit:'auto',format:'jpg',trim:false,fit_policy:2,orientation:'auto',rotation:0,brightness:0,scale:100,offset_x:0,offset_y:0,input_layout:'folders',input_exclude:['预览','参考','preview','reference'],naming:{folder:'{name}',image:'{scene:02}',start:1}}, limit = 0;
 let customSize = {width:1254,height:1254}, lastTaskSignature = '';
 let initialized = false, busyRequest = false, connected = false, catalogSignature = '', previewSignature = '', toastTimer;
 let artworkFiles = [], artworkTotal = 0, artworkOffset = 0, artworkFolder = '', artworkLoading = false, artworkError = '', artworkRequest = 0;
-let sceneSettingsOpen = false, advancedOpen = false, preferenceTimer;
+let editorEnabled=false, editorSceneIndex=0, editorBase=null, editorImage=null, editorBaseKey='', editorAttemptKey='', editorObservedKey='', editorPending=false, editorTimer, editorDrag=null, editorFlight=null;
+let sceneSettingsOpen = false, advancedOpen = false, preferenceTimer, preferenceRequest=Promise.resolve();
 let customFolderRule = false, customImageRule = false, draggedScene = null, imageItems = [], imageIndex = 0;
 const titles = {workbench:'套图工作台', templates:'模板管理', history:'批次记录', cache:'缓存管理'};
 const blocked = () => !!window.workbenchUpdateInstalling || !connected || activeStatuses.includes(state.task?.status) || busyRequest;
@@ -35,7 +36,7 @@ async function action(path, body, message) {
   if (busyRequest) return;
   busyRequest = true;
   updateLocks();
-  try { await request(path, body); if (message) notify(message); await refresh(); }
+  try { if(body?.settings)await persistPreferences(body.settings); await request(path, body); if (message) notify(message); await refresh(); }
   catch (error) { notify(error.message, true); }
   finally { busyRequest = false; updateLocks(); }
 }
@@ -63,6 +64,7 @@ function renderPage() {
   const focusValue=focusAttribute?active.getAttribute(focusAttribute):null;
   $('#page-content').innerHTML = ({workbench:renderWorkbench,templates:renderTemplates,history:renderHistory,cache:renderCache}[page])();
   updateLocks(); filterTemplates();
+  paintEditor(); observeEditor();
   if(focusAttribute){
     const replacement=[...document.querySelectorAll(`[${focusAttribute}]`)].find(el=>el.getAttribute(focusAttribute)===focusValue&&(!active.value||el.value===active.value));
     replacement?.focus({preventScroll:true});
@@ -106,8 +108,99 @@ function pathPicker(id,model,value,placeholder,action) {
   return `<div class="path-picker">${icon('folder')}<input id="${id}" data-model="${model}" value="${attr(value)}" placeholder="${placeholder}" aria-label="${placeholder}" data-edit><button data-action="${action}" data-edit>选择文件夹</button></div>`;
 }
 function fitControls() {
-  return `<div class="setting-section"><h3>怎样放入印区</h3><div class="fit-options" role="group" aria-label="印花适配">${[['auto','自动适配','满版图铺满，透明图完整放入'],['contain','完整放入','保留全部画面，边缘可能留空'],['cover','等比铺满','铺满印区，超出部分居中裁切'],['cover_bleed','去白边铺满','适合拱形和带白色补边的印花']].map(([value,label,help])=>`<button class="fit-option ${settings.fit===value?'selected':''}" data-fit-choice="${value}" aria-pressed="${settings.fit===value}" data-edit><span class="option-indicator"></span><span><b>${label}</b><small>${help}</small></span></button>`).join('')}</div><p class="field-help">方向和适配以印区自身为准，样机的位置、轮廓和透视固定。</p></div><div id="placement-fields" class="form-grid"><label>印花方向<select data-setting="orientation" data-edit>${options([['auto','自动匹配 · 横竖方向'],['original','保持原方向'],['cw90','顺时针 90°'],['ccw90','逆时针 90°'],['rotate180','旋转 180°']],settings.orientation)}</select></label><label>角度微调 · °<input type="number" min="-180" max="180" step="any" data-setting="rotation" value="${attr(settings.rotation)}" data-edit></label><label>印花适配<select data-setting="fit" data-edit>${options([['auto','自动 · 满版铺满 / 透明图完整'],['contain','完整放入 · 比例不同会留白'],['cover','等比铺满 · 居中裁切'],['cover_bleed','去白边铺满 · 拱形 / 补边图'],['stretch','拉伸填满 · 会改变比例']],settings.fit)}</select></label><label class="check-label"><input type="checkbox" data-setting="trim" ${settings.trim?'checked':''} data-edit>替换前裁去印花透明边缘</label></div>`;
+  return `<div class="setting-section"><h3>怎样放入印区</h3><div class="fit-options" role="group" aria-label="印花适配">${[['auto','自动适配','满版图铺满，透明图完整放入'],['contain','完整放入','保留全部画面，边缘可能留空'],['cover','等比铺满','铺满印区，超出部分居中裁切'],['cover_bleed','去白边铺满','适合拱形和带白色补边的印花']].map(([value,label,help])=>`<button class="fit-option ${settings.fit===value?'selected':''}" data-fit-choice="${value}" aria-pressed="${settings.fit===value}" data-edit><span class="option-indicator"></span><span><b>${label}</b><small>${help}</small></span></button>`).join('')}</div><p class="field-help">方向和适配以印区自身为准，样机的位置、轮廓和透视固定。</p></div><div id="placement-fields" class="form-grid"><label>印花方向<select data-setting="orientation" data-edit>${options([['auto','自动匹配 · 横竖方向'],['original','保持原方向'],['cw90','顺时针 90°'],['ccw90','逆时针 90°'],['rotate180','旋转 180°']],settings.orientation)}</select></label><label>角度微调 · °<input type="number" min="-180" max="180" step="any" data-setting="rotation" value="${attr(settings.rotation)}" data-edit></label><label>印花适配<select data-setting="fit" data-edit>${options([['auto','自动 · 满版铺满 / 透明图完整'],['contain','完整放入 · 比例不同会留白'],['cover','等比铺满 · 居中裁切'],['cover_bleed','去白边铺满 · 拱形 / 补边图'],['stretch','拉伸填满 · 会改变比例']],settings.fit)}</select></label><label class="check-label"><input type="checkbox" data-setting="trim" ${settings.trim?'checked':''} data-edit>替换前裁去印花透明边缘</label></div>`
+    + `<div class="setting-section"><label for="artwork-brightness"><b>印花亮度</b> <output id="artwork-brightness-value" for="artwork-brightness">${attr(settings.brightness)}</output></label><input type="range" id="artwork-brightness" data-setting="brightness" min="-30" max="30" step="1" value="${attr(settings.brightness)}" data-edit><p class="field-help">0 为原亮度。调整印花的中间调，对本批次每款的整套图片生效。</p></div>`;
 }
+const clampPlacement=(key,value)=>Math.round(Math.max(key==='scale'?10:-100,Math.min(key==='scale'?300:100,value))*100)/100;
+function editorScenes(){return currentTemplate()?scenesFor(currentTemplate()).filter(scene=>scene.mode!=='skip'):[];}
+function editorKey(){
+  const scenes=editorScenes();if(editorSceneIndex>=scenes.length)editorSceneIndex=0;
+  return JSON.stringify([selectedId,source.trim()||input.trim(),editorSceneIndex,scenes,['fit','fit_policy','orientation','rotation','trim','brightness'].map(key=>settings[key])]);
+}
+function renderPlacementEditor(){
+  const scenes=editorScenes();if(editorSceneIndex>=scenes.length)editorSceneIndex=0;
+  return `<section class="placement-editor" aria-label="印花位置编辑"><div class="placement-editor-heading"><h3>拖动与缩放印花</h3><button data-action="load-editor" data-edit>${editorEnabled?'重新加载母稿':'加载印花编辑'}</button></div><p class="field-help">母稿正面 · 最终边缘按 PSD 蒙版裁切</p><label>编辑并预览场景<select id="editor-scene" data-edit>${scenes.map((scene,i)=>`<option value="${i}" ${i===editorSceneIndex?'selected':''}>${escapeHTML(scene.name)}${scene.mode==='fixed'?' · 固定场景':''}</option>`).join('')}</select></label><div id="placement-stage" class="placement-stage" tabindex="0" role="group" aria-label="拖动印花调整位置，方向键微调"><canvas id="placement-canvas"></canvas><span class="placement-center" aria-hidden="true"></span><div id="placement-bounds" class="placement-bounds" hidden></div><button type="button" class="placement-resize" data-resize-artwork aria-label="拖动等比缩放印花" title="拖动等比缩放" data-edit hidden></button><p id="placement-placeholder">${editorEnabled?'正在准备母稿…':'加载印花后，可直接拖动调整位置'}</p></div><p id="placement-status" class="field-help" role="status"></p><div class="placement-controls">${[['scale','缩放',10,300],['offset_x','水平位置',-100,100],['offset_y','垂直位置',-100,100]].map(([key,label,min,max])=>`<label>${label} · %<div><input type="range" min="${min}" max="${max}" step="0.1" value="${settings[key]}" data-placement="${key}" aria-label="${label}" data-edit><input type="number" min="${min}" max="${max}" step="0.1" value="${settings[key]}" data-placement="${key}" aria-label="${label}百分比" data-edit></div></label>`).join('')}</div><div class="placement-actions"><button data-action="placement-center" data-edit>居中</button><button data-action="placement-reset" data-edit>重置位置与缩放</button></div><p class="field-help">拖动图案移动，拖动右下角等比缩放；松手后更新当前场景。位置与缩放对本批次所有印花和所选模板生效。</p></section>`;
+}
+function paintEditor(activeField){
+  document.querySelectorAll('[data-placement]').forEach(field=>{if(field!==activeField)field.value=settings[field.dataset.placement];});
+  const stage=$('#placement-stage'),canvas=$('#placement-canvas');if(!stage||!canvas)return;
+  const ready=editorBase&&editorImage?.complete&&editorImage.naturalWidth&&editorBaseKey===editorKey();
+  stage.classList.toggle('ready',!!ready);stage.classList.toggle('locked',blocked());
+  $('#placement-placeholder').hidden=!!ready;
+  $('#placement-placeholder').textContent=!editorEnabled?'加载印花后，可直接拖动调整位置':editorAttemptKey===editorKey()&&!editorFlight&&!ready?'母稿暂不可编辑，请重新加载':'正在准备母稿…';
+  $('#placement-bounds').hidden=!ready;
+  $('[data-resize-artwork]').hidden=!ready;
+  $('#placement-status').textContent=editorPending?(blocked()?'等待当前任务完成后更新预览…':'等待更新当前场景预览…'):ready?'拖动即时调整 · 松手更新场景预览':'';
+  if(!ready)return;
+  const b=editorBase,w=b.stage_width,h=b.stage_height,s=settings.scale/100;
+  stage.style.aspectRatio=`${w} / ${h}`;stage.style.width=`min(100%, ${400*w/h}px)`;
+  // Keep canvas memory bounded while preserving native stage coordinates.
+  const ratio=Math.min(1,1400/Math.max(w,h));canvas.width=Math.max(1,Math.round(w*ratio));canvas.height=Math.max(1,Math.round(h*ratio));
+  const ctx=canvas.getContext('2d');ctx.scale(canvas.width/w,canvas.height/h);
+  ctx.translate(w/2+settings.offset_x*w/100,h/2+settings.offset_y*h/100);ctx.scale(s,s);ctx.translate(-w/2,-h/2);
+  if(b.affine){ctx.transform(...b.affine);ctx.drawImage(editorImage,0,0);}
+  else ctx.drawImage(editorImage,b.x,b.y,b.width,b.height);
+  const bounds=$('#placement-bounds');bounds.style.left=`${50+(b.x/w*100-50)*s+settings.offset_x}%`;bounds.style.top=`${50+(b.y/h*100-50)*s+settings.offset_y}%`;bounds.style.width=`${b.width/w*100*s}%`;bounds.style.height=`${b.height/h*100*s}%`;
+  const handle=$('[data-resize-artwork]');handle.style.left=`clamp(0px, calc(${50+((b.x+b.width)/w*100-50)*s+settings.offset_x}% - 22px), calc(100% - 22px))`;handle.style.top=`clamp(0px, calc(${50+((b.y+b.height)/h*100-50)*s+settings.offset_y}% - 22px), calc(100% - 22px))`;
+}
+function scheduleEditor(delay=450){clearTimeout(editorTimer);editorTimer=setTimeout(flushEditor,delay);}
+function queueEditorPreview(){if(!editorEnabled)return;editorPending=true;paintEditor();scheduleEditor();}
+function observeEditor(){
+  if(!editorEnabled)return;
+  const key=editorKey();if(key!==editorObservedKey){editorObservedKey=key;editorPending=true;paintEditor();scheduleEditor();}
+  else if(editorPending&&!blocked()&&!editorFlight&&!editorDrag)scheduleEditor();
+}
+async function flushEditor(){
+  if(!editorEnabled||blocked()||editorDrag||editorFlight)return;
+  if(!selectedId||!(source.trim()||input.trim())||dirty.has(selectedId)||!editorScenes().length)return;
+  try{
+    validateSettings();const key=editorKey(),needsBase=editorBaseKey!==key;
+    if(needsBase&&editorAttemptKey===key)return;
+    const body={id:selectedId,source:source.trim()||input.trim(),settings:structuredClone(settings),scene:editorSceneIndex};
+    if(needsBase){editorAttemptKey=key;editorFlight={key,kind:'editor'};}
+    else {editorPending=false;editorFlight={key,kind:'preview'};}
+    busyRequest=true;updateLocks();
+    // Persist before starting a task: preferences writes require an idle backend.
+    clearTimeout(preferenceTimer);
+    await persistPreferences(body.settings);
+    const flight=editorFlight;
+    const accepted=await request(needsBase?'/api/editor':'/api/preview',body);
+    flight.taskId=accepted.task_id;flight.accepted=true;
+    await refresh();
+    // action refreshes state, which may already contain a completed result.
+    if(!activeStatuses.includes(state.task?.status))receiveEditor();
+  }catch(error){editorFlight=null;editorPending=false;notify(error.message,true);}
+  busyRequest=false;updateLocks();paintEditor();observeEditor();
+}
+function receiveEditor(){
+  if(!editorFlight?.accepted||state.task?.task_id!==editorFlight.taskId||activeStatuses.includes(state.task?.status))return;
+  const flight=editorFlight;editorFlight=null;
+  if(flight.kind==='editor'){
+    const result=state.task?.editor;
+    if(state.task.status==='done'&&state.task.kind==='editor'&&result?.url&&result.template_id===selectedId&&result.source===(source.trim()||input.trim())&&result.scene===editorSceneIndex&&flight.key===editorKey()){
+      editorBase=result;editorBaseKey=flight.key;editorImage=new Image();
+      const image=editorImage;image.onload=()=>{if(editorImage===image)paintEditor();};image.onerror=()=>{if(editorImage===image){editorBaseKey='';notify('无法读取母稿图片，请重新加载。',true);}};image.src=result.url;
+    }else if(flight.key===editorKey()){editorPending=false;}
+  }
+  paintEditor();
+}
+app.addEventListener('pointerdown',event=>{
+  const stage=event.target.closest('#placement-stage');if(!stage||blocked()||editorBaseKey!==editorKey()||!editorImage?.naturalWidth||event.button!==0)return;
+  event.preventDefault();const rect=stage.getBoundingClientRect();stage.setPointerCapture(event.pointerId);stage.focus({preventScroll:true});
+  editorDrag={pointer:event.pointerId,stage,rect,x:event.clientX,y:event.clientY,offsetX:settings.offset_x,offsetY:settings.offset_y,scale:settings.scale,resize:!!event.target.closest('[data-resize-artwork]')};
+  stage.classList.add('dragging');
+});
+app.addEventListener('pointermove',event=>{
+  const d=editorDrag;if(!d||event.pointerId!==d.pointer)return;
+  if(d.resize){
+    const cx=d.rect.left+d.rect.width*(.5+d.offsetX/100),cy=d.rect.top+d.rect.height*(.5+d.offsetY/100),vx=d.x-cx,vy=d.y-cy;
+    settings.scale=clampPlacement('scale',d.scale*((event.clientX-cx)*vx+(event.clientY-cy)*vy)/Math.max(1,vx*vx+vy*vy));
+  }else{settings.offset_x=clampPlacement('offset_x',d.offsetX+(event.clientX-d.x)/d.rect.width*100);settings.offset_y=clampPlacement('offset_y',d.offsetY+(event.clientY-d.y)/d.rect.height*100);}
+  paintEditor();
+});
+function finishEditorDrag(event){const d=editorDrag;if(!d||event.pointerId!==d.pointer)return;editorDrag=null;d.stage.classList.remove('dragging');if(d.stage.hasPointerCapture(d.pointer))d.stage.releasePointerCapture(d.pointer);savePreferences();queueEditorPreview();}
+app.addEventListener('pointerup',finishEditorDrag);app.addEventListener('pointercancel',finishEditorDrag);app.addEventListener('lostpointercapture',finishEditorDrag);
+app.addEventListener('keydown',event=>{if(event.target.id!=='placement-stage'||blocked()||!editorBase||editorBaseKey!==editorKey()||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key))return;event.preventDefault();const key=['ArrowLeft','ArrowRight'].includes(event.key)?'offset_x':'offset_y',delta=(['ArrowLeft','ArrowUp'].includes(event.key)?-1:1)*(event.shiftKey?5:.5);settings[key]=clampPlacement(key,settings[key]+delta);paintEditor();savePreferences();queueEditorPreview();});
 function renderWorkbench() {
   const template=currentTemplate();
   return `<div class="workbench-page" data-workflow-step="${workflowStep}">${heading('批量套图','选好素材，确认效果，一次完成整批导出。',`<button data-action="import" data-edit>${icon('plus')} 导入 PSD</button>`)}
@@ -116,7 +209,7 @@ function renderWorkbench() {
     <div class="step-panel" data-step-panel="1" ${workflowStep!==1?'hidden':''}><div class="panel-heading"><div><h2>选择套图模板</h2><p>可勾选多个模板，一起生成整批商品图。</p></div><button class="text" data-action="go-templates">管理模板</button></div>
     ${state.templates.length?`<div class="template-toolbar"><label class="search-control">${icon('search')}<input id="template-search" value="${attr(templateSearch)}" placeholder="搜索模板名称" aria-label="搜索模板名称"></label><span>${state.templates.length} 个模板</span></div>${renderTemplateCards()}<p id="template-no-match" class="field-help" hidden>没有匹配的模板，换个关键词试试。</p><p class="selection-help">勾选加入批次 · 点击缩略图切换预览</p>${template?`<details class="scene-settings" id="scene-settings" ${sceneSettingsOpen?'open':''}><summary>场景与导出顺序 <small>${escapeHTML(templateName(template))} · ${scenesFor(template).length} 个场景</small></summary>${renderScenes(template)}</details>`:''}`:empty('先导入一个 PSD 模板','导入后会自动识别场景和可替换的印花图层。',`<button class="primary" data-action="import" data-edit>${icon('plus')} 选择 PSD 文件</button>`)}</div>
     <div class="step-panel" data-step-panel="2" ${workflowStep!==2?'hidden':''}><div class="panel-heading"><div><h2>选择印花素材</h2><p>选择一个文件夹，点击其中一张查看套图效果。</p></div></div>${pathPicker('input-path','input',input,'选择印花所在文件夹','choose-input')}<div class="import-rules"><label>文件夹组织<select data-setting="input_layout" data-edit>${options([['folders','按子文件夹分款 · 每张印花独立一套'],['flat','每张图片单独一款']],settings.input_layout||'folders')}</select></label><label>排除文件名关键词 · 逗号分隔<input id="input-exclude" value="${attr((settings.input_exclude||[]).join('，'))}" placeholder="留空则读取所有图片" data-edit></label><small>分款模式：款式文件夹 / 印花名称 / 01、02…；根目录的散图仍各自一款。排除规则同时用于列表和批量导出。</small></div><div id="artwork-browser" aria-busy="${artworkLoading}">${renderArtworks()}</div></div>
-    <div class="step-panel" data-step-panel="3" ${workflowStep!==3?'hidden':''}><div class="panel-heading"><div><h2>确认印花效果</h2><p>调整后重新生成预览，确认画面方向和印区边缘。</p></div></div>${fitControls()}<div class="placement-tip">完整放入会保留全部图案；铺满可能裁切。手动角度叠加在所选方向上，正值顺时针、负值逆时针。</div></div>
+    <div class="step-panel" data-step-panel="3" ${workflowStep!==3?'hidden':''}><div class="panel-heading"><div><h2>确认印花效果</h2><p>拖动印花或缩放，当前场景会自动更新；导出前可生成整套预览。</p></div></div>${renderPlacementEditor()}${fitControls()}<div class="placement-tip">完整放入会保留全部图案；铺满可能裁切。手动角度叠加在所选方向上，正值顺时针、负值逆时针。</div></div>
     <div class="step-panel" data-step-panel="4" ${workflowStep!==4?'hidden':''}><div class="panel-heading"><div><h2>设置批量导出</h2><p>选择保存位置，确认文件夹和图片的命名方式。</p></div></div><label class="field-label" for="output-path">保存到</label>${pathPicker('output-path','output',output,'选择套图结果保存文件夹','choose-output')}<div class="output-hint"><span>每张印花对应一套商品图</span><button data-action="open-output" ${output?'':'disabled'}>打开文件夹 ${icon('arrow')}</button></div>${renderNaming()}${renderAdvanced()}</div>
   </section><aside class="preview-panel" aria-label="效果预览"><div class="preview-header"><div><h2>效果预览</h2><small>${template?escapeHTML(templateName(template)):'先选择一个模板'}</small></div><span class="badge">${template?scenesFor(template).filter(s=>s.mode!=='skip').length:0} 个场景</span></div><div class="preview-selected"><span class="field-label">当前印花</span><strong title="${attr(source)}">${source?escapeHTML(source.split(/[\\/]/).pop()):'还没有选择印花'}</strong><button data-action="choose-image" data-edit>${icon('image')} 另选图片</button></div>${template&&!selectedIds.has(template.id)?'<p class="preview-scope">当前预览的模板未加入本批导出，请返回第一步勾选。</p>':selectedIds.size>1?'<p class="preview-scope">这里预览当前模板。已选择多个模板，请分别点击模板检查效果。</p>':''}${renderOverviewControls()}<div id="preview-content">${renderPreviews()}</div><div class="preview-tools"><small>点击图片放大 · 左右方向键切换</small><button data-action="preview" class="primary" data-needs-artworks data-edit>生成预览</button></div></aside></div>
   <footer class="workflow-footer"><div class="batch-summary" id="workflow-summary" aria-live="polite"></div><div class="workflow-actions">${workflowStep>1?`<button data-step-target="${workflowStep-1}">上一步</button>`:''}${workflowStep<4?`<button class="primary" data-next-step="${workflowStep+1}">下一步：${['','选择模板','选择印花','确认效果','批量导出'][workflowStep+1]} ${icon('arrow')}</button>`:`<button class="primary export-button" data-action="batch" data-needs-artworks data-edit>${icon('download')} 开始批量导出</button>`}</div></footer></div>`;
@@ -131,7 +224,7 @@ function updateWorkflow() {
   const count=limit>0?Math.min(artworkTotal,limit):artworkTotal;
   const summary=$('#workflow-summary');
   if(summary)summary.innerHTML=`<b>${selectedIds.size} 个模板 <span>·</span> ${artworkTotal} 张印花</b><small>${totalScenes&&count?`预计导出 ${totalScenes*count} 张图片`:'选择模板和印花后，这里显示导出数量'}${output?' · 已设置保存位置':''}</small>`;
-  const complete=[selectedIds.size>0&&![...selectedIds].some(id=>dirty.has(id)),!!input.trim()&&artworkTotal>0,selectedIds.size===1&&selectedIds.has(selectedId)&&!!state.task?.preview?.length&&state.task.preview_template_id===selectedId&&!previewChanged(),false];
+  const complete=[selectedIds.size>0&&![...selectedIds].some(id=>dirty.has(id)),!!input.trim()&&artworkTotal>0,selectedIds.size===1&&selectedIds.has(selectedId)&&!!state.task?.preview?.length&&state.task.preview.length===editorScenes().length&&state.task.preview_template_id===selectedId&&!previewChanged(),false];
   document.querySelectorAll('.workflow-step').forEach((button,i)=>{button.classList.toggle('complete',complete[i]);button.querySelector('.step-number').innerHTML=complete[i]&&workflowStep!==i+1?icon('check'):String(i+1);});
   document.querySelectorAll('[data-action="open-output"]').forEach(button=>button.disabled=!output.trim());
   document.querySelectorAll('[data-fit-choice]').forEach(button=>{const selected=button.dataset.fitChoice===settings.fit;button.classList.toggle('selected',selected);button.setAttribute('aria-pressed',String(selected));});
@@ -156,10 +249,11 @@ function renderPreviews() {
   const previews = state.task?.preview_template_id === selectedId ? state.task.preview || [] : [];
   const sceneSettings = currentTemplate() ? scenesFor(currentTemplate()).map(({id,mode,targets,artwork_roles})=>({id,mode,targets,artwork_roles:artwork_roles||{}})) : [];
   const changed = (state.task?.preview_settings && Object.entries(settings).some(([key,value])=>!['naming','input_layout','input_exclude'].includes(key)&&JSON.stringify(state.task.preview_settings[key])!==JSON.stringify(value))) || (state.task?.preview_source && state.task.preview_source !== (source.trim()||input.trim())) || (state.task?.preview_scenes && JSON.stringify(state.task.preview_scenes)!==JSON.stringify(sceneSettings));
+  const partial=previews.length>0&&previews.length<editorScenes().length;
   const placement = [...new Set((state.task?.preview_fit||[]).map(info=>info.reason))].join('；');
   const overview=state.task?.overview;
   const sheet=overview?.template_id===selectedId?`<div class="overview-result"><div><strong>${escapeHTML(overview.title)}</strong><button data-action="overview-save" data-edit>保存总览图</button></div><button class="overview-image" data-image="${attr(overview.url)}" data-title="${attr(overview.title)}"><img src="${attr(overview.url)}" alt="${attr(overview.title)}"></button><small>共 ${overview.count} 张 · 修改选择或参数后请重新生成</small></div>`:'';
-  return sheet + (previews.length ? `${changed?'<div class="notice warning">预览参数与当前设置不同，请重新生成预览。</div>':''}${placement?`<p class="field-help preview-placement">本次预览：${escapeHTML(placement)}</p>`:''}<div class="preview-grid">${previews.map(p=>`<button class="preview-tile" data-image="${attr(p.url)}" data-title="${attr(p.name)}"><img src="${attr(p.url)}" alt="${attr(p.name)}" loading="lazy"><span>${escapeHTML(p.name)}</span></button>`).join('')}</div>` : `<div class="preview-empty"><span class="preview-symbol" aria-hidden="true">${icon('image')}</span><strong>在这里检查套图效果</strong><p>选好模板和印花后，点击“生成预览”。</p></div>`);
+  return sheet + (previews.length ? `${partial?'<p class="preview-scope">当前仅预览选定场景。点击“生成预览”检查整套图片。</p>':''}${changed?'<div class="notice warning">预览参数与当前设置不同，请重新生成预览。</div>':''}${placement?`<p class="field-help preview-placement">本次预览：${escapeHTML(placement)}</p>`:''}<div class="preview-grid">${previews.map(p=>`<button class="preview-tile" data-image="${attr(p.url)}" data-title="${attr(p.name)}"><img src="${attr(p.url)}" alt="${attr(p.name)}" loading="lazy"><span>${escapeHTML(p.name)}</span></button>`).join('')}</div>` : `<div class="preview-empty"><span class="preview-symbol" aria-hidden="true">${icon('image')}</span><strong>在这里检查套图效果</strong><p>选好模板和印花后，点击“生成预览”。</p></div>`);
 }
 function renderTemplates() {
   return heading('模板管理','将 PSD 作为模板导入，逐场景确认印花位置。', '<button class="primary" data-action="import" data-edit>＋ 导入 PSD</button>') + (state.templates.length ? `<div class="catalog-grid">${state.templates.map(t=>`<article class="card catalog-tile"><div class="catalog-cover">${t.scenes?.find(s=>s.thumbnail)?`<img src="${attr(t.scenes.find(s=>s.thumbnail).thumbnail)}" alt="${attr(t.name)} 场景缩略图" loading="lazy">`:'PSD 模板'}</div><h3>${escapeHTML(t.name)}</h3><p title="${attr(t.path)}">${escapeHTML(t.path)}</p><footer><span class="badge">${t.scenes?.length||0} 个场景</span><div class="actions"><button data-open-template="${attr(t.id)}">配置</button><button class="text error-text" data-remove-template="${attr(t.id)}" data-edit>移除</button></div></footer>${t.warnings?.length?`<p class="field-help error-text">有 ${t.warnings.length} 条扫描提示，打开配置查看。</p>`:''}</article>`).join('')}</div>` : `<section class="card">${empty('导入第一个模板','支持一次选择多个 PSD 文件，导入后会自动扫描场景和候选印花。','<button class="primary" data-action="import" data-edit>选择 PSD 文件</button>')}</section>`);
@@ -182,7 +276,7 @@ function renderTask() {
   if(signature===lastTaskSignature && container.innerHTML) return;
   lastTaskSignature=signature;
   if(task.status==='done') {
-    const message=task.kind==='preview'?'预览已生成':task.kind==='scan'?'模板已导入':'本次套图已处理完成';
+    const message=task.kind==='editor'?'印花编辑已就绪':task.kind==='preview'?'预览已生成':task.kind==='scan'?'模板已导入':'本次套图已处理完成';
     container.innerHTML=`<div class="completion-bar"><span>✓ ${message}</span>${task.kind==='batch'?'<button class="text" data-action="open-output">打开保存文件夹 ↗</button>':''}</div>`;
     return;
   }
@@ -191,6 +285,7 @@ function renderTask() {
   container.innerHTML = `<section class="card task-card" aria-label="任务进度"><header><div class="task-status"><h2>${task.kind==='scan'?'扫描模板':task.kind==='preview'?'生成预览':'当前任务'}</h2><span class="badge ${task.status==='failed'?'failed':task.status==='done'?'success':task.status==='running'?'uploading':''}">${statusLabel(task.status)}</span></div><small>${total?`${Math.round(progress/total*100)}%`:active?'请稍候':''}</small></header><div class="task-body"><p class="task-message ${task.error?'error-text':''}" role="status">${escapeHTML(task.error||task.message||statusLabel(task.status))}</p><div class="task-meter"><progress max="${total||1}" ${total||!active?`value="${total?Math.min(progress,total):task.status==='done'?1:0}"`:''} aria-label="任务进度"></progress><small>${progress} / ${total||'—'}</small></div><div class="task-footer"><small>${task.status==='paused'?'任务已暂停，点击继续可接着处理。':task.status==='stopping'?'正在结束当前处理，请等待。':active?'处理期间，模板和导出参数暂时锁定。':'任务记录保留在本次会话中。'}</small><div class="actions">${task.status==='running'&&task.kind==='batch'?'<button data-control="pause">暂停</button>':''}${task.status==='paused'?'<button data-control="resume" class="primary">继续</button>':''}${['running','paused'].includes(task.status)?'<button data-control="stop" class="danger-outline">停止</button>':''}</div></div>${task.results?.length?`<details class="results-detail"><summary>查看处理结果 · ${task.results.length} 项</summary><ul>${task.results.slice(-100).map(r=>`<li>${escapeHTML(typeof r==='string'?r:r.message||r.path||r.output||r.name||JSON.stringify(r))}</li>`).join('')}</ul></details>`:''}</div></section>`;
 }
 function updateLocks() {
+  $('#placement-stage')?.classList.toggle('locked',blocked());
   document.querySelectorAll('[data-edit]').forEach(element => { element.disabled = blocked() || (element.dataset.action==='overview-many'&&!overviewSelected.size) || (element.dataset.action==='overview-set'&&!source) || (element.hasAttribute('data-dimension') && settings.width===0 && settings.height===0) || (element.hasAttribute('data-needs-artworks') && artworkLoading) || (element.dataset.action==='artworks-prev' && (artworkLoading || artworkOffset===0)) || (element.dataset.action==='artworks-next' && (artworkLoading || artworkOffset+40>=artworkTotal)) || (element.hasAttribute('data-resume') && !historyPath(state.history[Number(element.dataset.resume)]||{})); });
   document.querySelectorAll('[data-control]').forEach(element => { element.disabled = busyRequest; });
   updateWorkflow();
@@ -234,6 +329,8 @@ function validateSettings() {
     if (!Number.isInteger(Number(settings[key])) || Number(settings[key])<1 || Number(settings[key])>max) throw new Error(`${name}请填写 1–${max} 的整数。`);
   }
   if(!originalSize && settings.width*settings.height>32000000) throw new Error('导出总像素不能超过 3200 万，请减小宽度或高度。');
+  for(const key of ['scale','offset_x','offset_y'])if(!Number.isFinite(settings[key])||settings[key]!==clampPlacement(key,settings[key]))throw new Error('缩放范围为 10–300%，位置范围为 -100–100%。');
+  if (!Number.isInteger(settings.brightness) || Math.abs(settings.brightness) > 30) throw new Error('印花亮度请填写 -30～30 的整数。');
   if (!Number.isFinite(settings.rotation) || settings.rotation < -180 || settings.rotation > 180) throw new Error('角度微调请填写 -180～180 度的数字。');
   if (!Number.isInteger(Number(limit)) || Number(limit)<0) throw new Error('处理上限请填写大于或等于 0 的整数。');
 }
@@ -241,11 +338,17 @@ async function choose(kind) {
   const data = window.desktop?.choose ? await window.desktop.choose(kind) : await request('/api/choose',{kind});
   return Array.isArray(data) ? data : data?.paths || [];
 }
+function persistPreferences(snapshot=settings){
+  clearTimeout(preferenceTimer);
+  const body={input:input.trim(),output:output.trim(),settings:structuredClone(snapshot),limit:Number(limit)};
+  preferenceRequest=preferenceRequest.catch(()=>{}).then(()=>request('/api/preferences',body));
+  return preferenceRequest;
+}
 function savePreferences() {
   clearTimeout(preferenceTimer);
   preferenceTimer = setTimeout(async()=>{
     try { validateSettings(); } catch { return; }
-    try { await request('/api/preferences',{input:input.trim(),output:output.trim(),settings,limit:Number(limit)}); }
+    try { await persistPreferences(); }
     catch(error) { notify(`设置未能保存：${error.message}`,true); }
   },500);
 }
@@ -266,6 +369,8 @@ async function loadArtworks(offset=0, resetSource=false) {
   finally { if(token===artworkRequest) { artworkLoading=false; renderPage(); } }
 }
 async function handleAction(name) {
+  if(name==='load-editor'){if(blocked())return;editorEnabled=true;editorAttemptKey='';editorBaseKey='';editorPending=true;renderPage();scheduleEditor(0);return;}
+  if(name==='placement-center'||name==='placement-reset'){if(blocked())return;settings.offset_x=0;settings.offset_y=0;if(name==='placement-reset')settings.scale=100;paintEditor();savePreferences();queueEditorPreview();return;}
   if (name==='go-templates') { page='templates'; renderShell(); return; }
   if (name==='open-output') {
     try { if(!output.trim())throw new Error('请先选择保存文件夹。'); clearTimeout(preferenceTimer); await request('/api/preferences',{input:input.trim(),output:output.trim(),settings,limit:Number(limit)}); if(window.desktop?.openOutput)await window.desktop.openOutput(output.trim());else await request('/api/open-output',{path:output.trim()}); }
@@ -297,6 +402,7 @@ async function handleAction(name) {
       validateSettings(); if(!selectedId) throw new Error('请先导入并选择模板。');
       if(!source.trim()&&!input.trim()) throw new Error('请选择一张预览印花，或填写印花文件夹。');
       if(dirty.has(selectedId)) throw new Error('请先保存当前模板的场景设置。');
+      editorPending=false;clearTimeout(editorTimer);
       await action('/api/preview',{id:selectedId,source:source.trim()||input.trim(),settings},'正在生成预览');
     }
     if (name==='batch') {
@@ -338,16 +444,19 @@ app.addEventListener('click', async (event)=> {
 });
 app.addEventListener('input',(event)=> {
   const field=event.target;
+  if(field.dataset.placement){const key=field.dataset.placement,number=Number(field.value);if(field.value===''||!Number.isFinite(number))return;settings[key]=clampPlacement(key,number);paintEditor(field);savePreferences();queueEditorPreview();return;}
   if(field.id==='template-search'){templateSearch=field.value;filterTemplates();return;}
   if(field.dataset.naming) { settings.naming[field.dataset.naming]=field.type==='number'?Number(field.value):field.value; if($('#naming-example'))$('#naming-example').textContent=namingExample(); savePreferences(); }
   if(field.dataset.model) { const value=field.type==='number'?Number(field.value):field.value; if(field.dataset.model==='input')input=value; if(field.dataset.model==='output')output=value; if(field.dataset.model==='source')source=value; if(field.dataset.model==='limit')limit=value; }
   if(field.dataset.model && $('#preview-content'))$('#preview-content').innerHTML=renderPreviews();
-  if(field.dataset.setting) { settings[field.dataset.setting]=field.type==='checkbox'?field.checked:field.type==='number'?Number(field.value):field.value; if($('#preview-content'))$('#preview-content').innerHTML=renderPreviews(); }
+  if(field.dataset.setting) { settings[field.dataset.setting]=field.type==='checkbox'?field.checked:(field.type==='number'||field.type==='range')?Number(field.value):field.value; if(field.dataset.setting==='brightness')$('#artwork-brightness-value').textContent=field.value; if($('#preview-content'))$('#preview-content').innerHTML=renderPreviews(); }
   if(field.dataset.setting || field.dataset.model==='limit')savePreferences();
-  updateWorkflow();
+  updateWorkflow(); observeEditor();
 });
 app.addEventListener('change',(event)=> {
   const field=event.target;
+  if(field.dataset.placement){field.value=settings[field.dataset.placement];return;}
+  if(field.id==='editor-scene'){editorSceneIndex=Number(field.value);observeEditor();return;}
   if(field.dataset.namingMode) {
     const key=field.dataset.namingMode,custom=field.value==='custom';
     if(key==='folder')customFolderRule=custom;else customImageRule=custom;
@@ -421,12 +530,13 @@ async function refresh() {
     if(!$('#page-content')||!wasConnected) { renderShell(); catalogSignature=signature; }
     else {
       renderTask();
-      const editing=draggedScene||document.activeElement?.matches('input,select,summary');
+      const editing=editorDrag||draggedScene||document.activeElement?.matches('input,select,summary');
       if(signature!==catalogSignature&&!editing) { renderPage(); catalogSignature=signature; }
       if(previews!==previewSignature&&$('#preview-content')){$('#preview-content').innerHTML=renderPreviews();updateWorkflow();}
       if(state.task.kind==='overview'&&state.task.status==='done'&&state.task.overview?.url!==oldOverview){overviewOpen=false;renderPage();}
       if(oldStatus!==state.task.status)updateLocks();
     }
+    receiveEditor(); observeEditor();
     previewSignature=previews;
     $('#connection').innerHTML='';
     if(firstLoad && input.trim())loadArtworks();

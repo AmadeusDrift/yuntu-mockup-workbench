@@ -91,7 +91,9 @@ def create_server(service, port=0):
                 elif route == '/api/template':
                     result = service.configure(data['id'], data['scenes'])
                 elif route == '/api/preview':
-                    result = service.preview(data['id'], data['source'], data['settings'])
+                    result = service.preview(data['id'], data['source'], data['settings'], data.get('scene'))
+                elif route == '/api/editor':
+                    result = service.editor(data['id'], data['source'], data['settings'], data.get('scene',0))
                 elif route == '/api/overview':
                     result = service.overview(data['id'],data['sources'],data['settings'],data.get('scene'))
                 elif route == '/api/save-overview':

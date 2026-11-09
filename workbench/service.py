@@ -14,7 +14,8 @@ import catalog
 from cache import DiskCache
 
 DEFAULTS = {'input': '', 'output': '', 'settings': {'width': 0, 'height': 0,
-            'ppi': 72, 'quality': 100, 'fit': 'auto', 'format': 'jpg', 'trim': False, 'fit_policy': 2, 'orientation': 'auto', 'rotation': 0,
+            'ppi': 72, 'quality': 100, 'fit': 'auto', 'format': 'jpg', 'trim': False, 'fit_policy': 2, 'orientation': 'auto', 'rotation': 0, 'brightness': 0,
+            'scale': 100, 'offset_x': 0, 'offset_y': 0,
             'naming': {'folder': '{name}', 'image': '{scene:02}', 'start': 1}},
             'limit': 0, 'preferences_version': 2}
 
@@ -74,7 +75,8 @@ class Service:
         with self.lock:
             self.idle_required()
             self.control = engine.Control()
-            self.task.update(status='running', kind=kind, message='正在准备…', progress=0, total=0,
+            task_id=uuid.uuid4().hex
+            self.task.update(task_id=task_id,status='running', kind=kind, message='正在准备…', progress=0, total=0,
                              error='', results=[])
         def work():
             final_status = 'done'
@@ -100,7 +102,7 @@ class Service:
                         self.control = None
                         self.task.update(status=final_status, error=error, message=message)
         threading.Thread(target=work, daemon=True, name='workbench-task').start()
-        return {'ok': True}
+        return {'ok': True, 'task_id': task_id}
 
     def finish_history(self):
         for entry in self.history:
@@ -254,9 +256,69 @@ class Service:
         os.startfile(str(target))
         return {'ok':True}
 
-    def preview(self, ident, source, settings):
+    @staticmethod
+    def checked_scene(template, scene):
+        scenes = [s for s in template['scenes'] if s.get('mode') != 'skip']
+        if scene is not None and (type(scene) is not int or not 0 <= scene < len(scenes)):
+            raise ValueError('请选择有效的轮播场景')
+        return scenes
+
+    def editor(self, ident, source, settings, scene=0):
         template = copy.deepcopy(self.find(ident))
         settings = engine.settings_checked(settings)
+        self.checked_scene(template, scene)
+        if scene is None:raise ValueError('请选择需要编辑的场景')
+        requested_source = str(source)
+        source = Path(source)
+        if source.is_dir():
+            images = self.input_images(source, settings.get('input_exclude'))
+            if not images:raise ValueError('印花文件夹里没有支持的图片')
+            source = images[0]
+        if not source.is_file():raise ValueError('请先选择一张印花图片')
+        def work():
+            from PIL import ImageOps, Image
+            manifest = self.manifest(template)
+            with self.cache.use(manifest):
+                data = json.loads(manifest.read_text(encoding='utf-8'))
+                def slots(ops):
+                    for op in ops:
+                        if op['kind']=='slot':yield op
+                        if op.get('ops'):yield from slots(op['ops'])
+                        if op.get('base_op'):yield from slots([op['base_op']])
+                slot = next(slots(data['scenes'][scene]['ops']), None)
+                if slot is None:raise ValueError('这个场景是固定图，没有可调整的印花层，请选择换图场景')
+                stage = tuple(slot['native_size'])
+                artwork = engine.load_image(source,preserve_alpha=settings['fit'] in ('auto','cover_bleed'))
+                try:
+                    if settings.get('trim') and settings['fit']!='auto':
+                        bounds=artwork.getchannel('A').getbbox()
+                        if bounds:
+                            cropped=artwork.crop(bounds);artwork.close();artwork=cropped
+                    if settings.get('brightness',0):
+                        adjusted=engine.adjust_artwork_brightness(artwork,settings['brightness'])
+                        artwork.close();artwork=adjusted
+                    prepared, layout = engine.prepare_placement_artwork(artwork,stage,settings['fit'],settings.get('fit_policy',1),settings.get('orientation','original'),settings.get('rotation',0))
+                    try:
+                        thumb=prepared.copy();thumb.thumbnail((1600,1600),Image.Resampling.LANCZOS)
+                        affine=list(layout['affine'])
+                        for index in (0,1):affine[index]*=prepared.width/thumb.width
+                        for index in (2,3):affine[index]*=prepared.height/thumb.height
+                        folder=self.root/'artworks'/'editor';folder.mkdir(exist_ok=True)
+                        filename=uuid.uuid4().hex+'.png';thumb.save(folder/filename);thumb.close()
+                        self.update(editor=dict(layout,affine=affine,url='/media/artworks/editor/'+filename,
+                            stage_width=stage[0],stage_height=stage[1],scene=scene,source=requested_source,
+                            template_id=ident,settings=settings),progress=1,total=1)
+                        for old in sorted(folder.glob('*.png'),key=lambda p:p.stat().st_mtime,reverse=True)[16:]:
+                            if not old.is_symlink() and old.resolve().parent==folder.resolve():old.unlink()
+                    finally:
+                        if prepared is not artwork:prepared.close()
+                finally:artwork.close()
+        return self.start('editor',work)
+
+    def preview(self, ident, source, settings, scene=None):
+        template = copy.deepcopy(self.find(ident))
+        settings = engine.settings_checked(settings)
+        self.checked_scene(template,scene)
         requested_source = str(source)
         source = Path(source)
         if source.is_dir():
@@ -279,8 +341,8 @@ class Service:
                         if op['kind']=='slot':native_sizes.add(tuple(op['native_size']))
                         if op.get('ops'):collect(op['ops'])
                         if op.get('base_op'):collect([op['base_op']])
-                for scene in renderer.data['scenes']:
-                    if not scene.get('fixed'):collect(scene['ops'])
+                for candidate_scene in renderer.data['scenes']:
+                    if not candidate_scene.get('fixed'):collect(candidate_scene['ops'])
                 if source.is_file() and native_sizes and (settings['fit']=='auto' or 'orientation' in settings):
                     artwork=engine.load_image(source,preserve_alpha=True)
                     try:
@@ -296,15 +358,17 @@ class Service:
                 destination = self.root / 'previews' / uuid.uuid4().hex
                 destination.mkdir()
                 previews = []
-                for i, (name, image) in enumerate(renderer.render(source, settings)):
+                indices=list(range(len(renderer.data['scenes']))) if scene is None else [scene]
+                for position, (name, image) in enumerate(renderer.render(source, settings,scene_indices=indices)):
+                    i=indices[position]
                     if self.control.stop.is_set():
                         image.close()
                         break
                     # Preview is rendered with export settings so framing matches final output.
                     image.save(destination / f'{i}.png')
-                    previews.append({'name': name, 'url': f'/media/previews/{destination.name}/{i}.png'})
+                    previews.append({'name': name, 'url': f'/media/previews/{destination.name}/{i}.png','scene_index':i})
                     image.close()
-                    self.update(progress=i + 1, total=len(renderer.data['scenes']), message='生成场景 ' + name)
+                    self.update(progress=position + 1, total=len(indices), message='生成场景 ' + name)
                 self.update(preview=previews, preview_signature=preview_stamp, preview_manifest=hashlib.sha256(manifest.read_bytes()).hexdigest(), preview_fit=fit_info, preview_template_id=template['id'], preview_settings=settings,
                             preview_source=requested_source, preview_scenes=[
                                 {k: s.get(k,{}) for k in ('id', 'mode', 'targets', 'artwork_roles')} for s in template['scenes']])
@@ -350,8 +414,9 @@ class Service:
                         key=hashlib.sha256(json.dumps([manifest_digest,str(manifest.parent),source,stamp,pixel_settings,index],sort_keys=True).encode()).hexdigest()
                         target=folder/(key+'.png');targets[index]=target
                         previews=previous.get('preview',[])
-                        if not target.exists() and reusable and index<len(previews):
-                            candidate=(self.root/previews[index]['url'].removeprefix('/media/')).resolve()
+                        preview=next((p for position,p in enumerate(previews) if p.get('scene_index',position)==index),None)
+                        if not target.exists() and reusable and preview:
+                            candidate=(self.root/preview['url'].removeprefix('/media/')).resolve()
                             if candidate.is_relative_to((self.root/'previews').resolve()) and candidate.is_file():
                                 from PIL import Image
                                 with Image.open(candidate) as image:image.thumbnail((900,900));image.save(target)
