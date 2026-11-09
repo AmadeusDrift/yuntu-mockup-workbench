@@ -94,6 +94,47 @@ class EffectsTests(unittest.TestCase):
                                        Layer('shade', mode=BlendMode.SOFT_LIGHT)], (4, 4), 'test')
         self.assertEqual([op.get('blend', 'normal') for op in ops], ['normal', 'screen', 'soft_light'])
 
+    def test_clipped_multiply_white_preserves_backdrop_for_static_and_dynamic_base(self):
+        for dynamic in (False, True):
+            with self.subTest(dynamic=dynamic):
+                compiler = engine.Compiler(self.folder, 'PRODUCT')
+                back = Layer('ceramic')
+                back.topil = lambda: Image.new('RGBA', (4, 4), (100, 150, 200, 255))
+                base = Layer('PRODUCT' if dynamic else 'base', kind='smartobject' if dynamic else 'pixel', mode=BlendMode.MULTIPLY)
+                base.topil = lambda: Image.new('RGBA', (4, 4), 'white')
+                shine = Layer('shine', mode=BlendMode.SCREEN, clipping=True, opacity=13)
+                ops = compiler.compile_layers([back, base, shine], (4, 4), 'scene')
+                renderer = self.renderer(ops, workbench=True)
+                out = renderer.render_scene(renderer.data['scenes'][0], Image.new('RGBA', (4, 4), 'white'), 'stretch', {})
+                self.assertEqual(out.getpixel((2, 2)), (100, 150, 200, 255))
+
+    def test_selected_layer_keeps_real_name_in_errors(self):
+        compiler = engine.Compiler(self.folder, '__WORKBENCH_PRINT__')
+        base = Layer('真实印花', kind='smartobject', opacity=120)
+        compiler.target_layer_ids = {id(base)}
+        with self.assertRaisesRegex(ValueError, '真实印花.*120/255'):
+            compiler.compile_layers([base, Layer('shine', clipping=True)], (4, 4), '场景1')
+
+    def test_clipped_screen_then_multiply_color_and_partial_alpha(self):
+        compiler = engine.Compiler(self.folder, 'PRODUCT')
+        back = Layer('ceramic')
+        back.topil = lambda: Image.new('RGBA', (4, 4), (100, 150, 200, 255))
+        base = Layer('印花', kind='smartobject', mode=BlendMode.MULTIPLY)
+        compiler.target_layer_ids = {id(base)}
+        shine = Layer('shine', mode=BlendMode.SCREEN, clipping=True)
+        shine.topil = lambda: Image.new('RGBA', (4, 4), (60, 100, 180, 128))
+        ops = compiler.compile_layers([back, base, shine], (4, 4), 'scene')
+        self.assertEqual(engine.slot_count(ops), 1)
+        art = Image.new('RGBA', (4, 4))
+        art.putpixel((1, 1), (40, 80, 120, 128))
+        renderer = self.renderer(ops, workbench=True)
+        out = renderer.render_scene(renderer.data['scenes'][0], art, 'stretch', {})
+        screened = reference_pixel((40, 80, 120, 255), (60, 100, 180, 128), 'screen')
+        # Opaque-backdrop multiply uses an 8-bit multiply plane, then alpha over.
+        expected = tuple(round(b * (1 - 128/255) + (b*s//255) * 128/255) for b,s in zip((100,150,200),screened[:3])) + (255,)
+        self.assertEqual(out.getpixel((1, 1)), expected)
+        self.assertEqual(out.getpixel((0, 0)), (100, 150, 200, 255))
+
     def test_dynamic_product_base_masks_fixed_clipped_effects(self):
         compiler = engine.Compiler(self.folder, 'PRODUCT')
         ops = compiler.compile_layers([Layer('PRODUCT', kind='smartobject'),

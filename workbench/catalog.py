@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -125,6 +126,7 @@ def inspect(path, media_root, progress=lambda message: None):
         records.append({'id': sid, 'name': group.name.strip() if sid != 'document' else '1',
                         'mode': 'replace' if targets else 'fixed', 'targets': targets,
                         'candidates': candidates, 'thumbnail': thumb})
+    warnings.extend(preflight(psd, records, progress))
     return {'id': ident, 'name': path.stem, 'path': str(path), 'signature': signature,
             'digest': signature['sha256'], 'canvas': list(psd.size), 'scenes': records, 'warnings': warnings}
 
@@ -158,37 +160,14 @@ def compile_template(template, folder, progress=lambda message: None):
     if fingerprint(path)['sha256'] != template['digest']:
         raise ValueError('PSD 已经修改，请重新导入并核对场景设置')
     psd = PSDImage.open(path)
-    nodes = dict(scene_nodes(psd))
-    layer_lookup = {i: layer for i, layer, _ in walk(psd)}
     compiler = engine.Compiler(folder, '__WORKBENCH_PRINT__')
     compiler.progress = progress
     compiled = []
-    scene_groups = set(nodes.values()) - {psd}
     for scene in template['scenes']:
         if scene['mode'] == 'skip':
             continue
-        group = nodes[scene['id']]
         progress(f'建立场景 {scene["name"]} 的缓存')
-        if scene['mode'] == 'fixed':
-            image = scene_image(psd, group, list(nodes.items()))
-            ops = [{'kind': 'static', 'asset': compiler.asset(image)}]
-        else:
-            if not scene['targets']:
-                raise ValueError('换图场景没有选择印花层')
-            originals = []
-            try:
-                compiler.artwork_roles={id(layer_lookup[ident]):role for ident,role in scene.get('artwork_roles',{}).items()}
-                for ident in scene['targets']:
-                    layer = layer_lookup[ident]
-                    originals.append((layer, layer.name))
-                    layer.name = '__WORKBENCH_PRINT__'
-                active = [l for l in psd if l not in scene_groups or l is group]
-                ops = compiler.compile_layers(active, psd.size, scene['name'], force_visible=group if group is not psd else None)
-                if not engine.slot_count(ops):
-                    raise ValueError(f'场景 {scene["name"]} 选中的印花不可见，请检查图层开关')
-            finally:
-                for layer, name in originals:
-                    layer.name = name
+        ops = compile_scene(psd, scene, compiler)
         compiled.append({'name': scene['name'], 'width': psd.width, 'height': psd.height,
                          'slots': engine.slot_count(ops), 'ops': ops, 'fixed': scene['mode'] == 'fixed'})
     if not compiled:
@@ -196,3 +175,41 @@ def compile_template(template, folder, progress=lambda message: None):
     engine.write_json(Path(folder) / 'template.json', {'version': 4, 'workbench': True,
         'product_name': '__WORKBENCH_PRINT__', 'sources': [str(path)], 'scenes': compiled,
         'warnings': list(dict.fromkeys(compiler.warnings)), 'source_digest': template['digest']})
+
+
+def compile_scene(psd, scene, compiler):
+    nodes = dict(scene_nodes(psd))
+    group = nodes[scene['id']]
+    if scene['mode'] == 'fixed':
+        image = scene_image(psd, group, list(nodes.items()))
+        return [{'kind': 'static', 'asset': compiler.asset(image)}]
+    if not scene['targets']:
+        raise ValueError(f'场景 {scene["name"]}：没有选择印花层')
+    lookup = {i: layer for i, layer, _ in walk(psd)}
+    compiler.target_layer_ids = {id(lookup[i]) for i in scene['targets']}
+    compiler.artwork_roles = {id(lookup[i]): role for i, role in scene.get('artwork_roles', {}).items()}
+    groups = set(nodes.values()) - {psd}
+    active = [layer for layer in psd if layer not in groups or layer is group]
+    ops = compiler.compile_layers(active, psd.size, scene['name'], force_visible=group if group is not psd else None)
+    if not engine.slot_count(ops):
+        raise ValueError(f'场景 {scene["name"]} 选中的印花不可见，请检查图层开关')
+    return ops
+
+
+def preflight(psd, scenes, progress=lambda message: None):
+    """Exercise the actual compiler once per replace scene; never save the PSD."""
+    warnings = []
+    for scene in scenes:
+        if scene['mode'] != 'replace':
+            continue
+        progress(f'检查场景 {scene["name"]} 的套图兼容性')
+        # Release scratch assets after each scene to bound disk usage.
+        with tempfile.TemporaryDirectory(prefix='taotu-preflight-') as folder:
+            compiler = engine.Compiler(folder, '__WORKBENCH_PRINT__')
+            compiler.progress = progress
+            try:
+                compile_scene(psd, scene, compiler)
+                warnings.extend(compiler.warnings)
+            except ValueError as exc:
+                warnings.append(f'套图兼容提醒：{exc}')
+    return list(dict.fromkeys(warnings))

@@ -9,7 +9,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA = 2
+SCHEMA = 3
 
 
 def cache_key(template):

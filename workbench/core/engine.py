@@ -142,8 +142,10 @@ class Compiler:
     @staticmethod
     def check_clip_base(layer, label, blend_if):
         from psd_tools.constants import BlendMode, Tag
-        if layer.opacity!=255 or layer.blend_mode!=BlendMode.NORMAL or blend_if:
-            raise ValueError(label+'：剪贴基层需为普通模式、无混合颜色带，且图层不透明度需为100%')
+        if layer.opacity!=255:
+            raise ValueError(label+f'：剪贴基层不透明度为 {layer.opacity}/255，目前需为 100%')
+        if blend_if:
+            raise ValueError(label+'：剪贴基层使用了混合颜色带，目前暂不支持此组合')
         if not layer.tagged_blocks.get_data(Tag.BLEND_CLIPPING_ELEMENTS,1):
             raise ValueError(label+'：暂不支持关闭“将剪贴图层混合成组”的剪贴基层')
 
@@ -374,7 +376,7 @@ class Compiler:
                     mask=self.mask(layer,size,here)
                     flush();ops.append({'kind':'group','ops':children,'opacity':layer.opacity,'mask':self.asset(mask) if mask else None,
                                         'blend':self.blend_name(layer),'blend_if':blend_if})
-            elif layer.name == self.product_name:
+            elif (id(layer) in self.target_layer_ids if hasattr(self,'target_layer_ids') else layer.name == self.product_name):
                 flush()
                 slot=self.slot(layer,size,here)
                 slot['blend_if']=blend_if
@@ -383,7 +385,10 @@ class Compiler:
                 elif index+1<len(layers) and layers[index+1].clipping:
                     self.check_clip_base(layer,here,blend_if)
                     shadow=slot.pop('shadow',None)
-                    clip_stack={'kind':'clipstack','base_op':slot,'ops':[],'shadow':shadow}
+                    # Blend the completed clipping group against the backdrop,
+                    # rather than blending its base against transparent black.
+                    blend=slot.pop('blend','normal')
+                    clip_stack={'kind':'clipstack','base_op':slot,'ops':[],'shadow':shadow,'blend':blend}
                     ops.append(clip_stack)
                 else:ops.append(slot)
             else:
@@ -414,7 +419,7 @@ class Compiler:
                 elif index+1<len(layers) and layers[index+1].clipping:
                     self.check_clip_base(layer,here,blend_if)
                     flush()
-                    clip_stack={'kind':'clipstack','base':self.asset(full),'ops':[],'shadow':shadow}
+                    clip_stack={'kind':'clipstack','base':self.asset(full),'ops':[],'shadow':shadow,'blend':self.blend_name(layer)}
                     ops.append(clip_stack)
                 elif layer.blend_mode in (BlendMode.MULTIPLY,BlendMode.SCREEN,BlendMode.SOFT_LIGHT,BlendMode.DARKEN) or blend_if:
                     flush()

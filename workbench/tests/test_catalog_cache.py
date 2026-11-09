@@ -5,6 +5,17 @@ from pathlib import Path
 
 
 class CatalogTests(unittest.TestCase):
+    def test_preflight_reports_each_scene_and_continues_after_errors(self):
+        import catalog
+        from unittest.mock import patch
+        scenes = [dict(id=str(i),name=str(i),mode='replace',targets=['x']) for i in range(3)]
+        with patch.object(catalog, 'compile_scene', create=True, side_effect=[ValueError('1/印花：错误一'), [], ValueError('3/印花：错误二')]) as compile_scene:
+            warnings = catalog.preflight(None, scenes)
+        self.assertEqual(compile_scene.call_count, 3)
+        self.assertEqual(len(warnings), 2)
+        self.assertIn('错误一', warnings[0])
+        self.assertIn('错误二', warnings[1])
+
     def test_non_numbered_helper_groups_remain_common(self):
         import catalog
         class Layer(list):
