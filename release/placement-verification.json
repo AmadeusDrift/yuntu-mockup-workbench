@@ -1,0 +1,325 @@
+{
+  "status": "PASS",
+  "version": "0.3.7",
+  "run": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803",
+  "fixture": "synthetic cached renderer",
+  "drag": true,
+  "corner_resize": true,
+  "scale": 135,
+  "partial_preview": true,
+  "full_scenes": 3,
+  "brightness": 12,
+  "persisted_preferences": true,
+  "reset": true,
+  "requests": [
+    {
+      "url": "/api/editor",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 100,
+          "offset_x": 0,
+          "offset_y": 0,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 0
+      }
+    },
+    {
+      "url": "/api/preview",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 100,
+          "offset_x": 0,
+          "offset_y": 0,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 0
+      }
+    },
+    {
+      "url": "/api/preview",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 100,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 0
+      }
+    },
+    {
+      "url": "/api/preview",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 78.96,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 0
+      }
+    },
+    {
+      "url": "/api/preview",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 135,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 0
+      }
+    },
+    {
+      "url": "/api/editor",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 135,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 1
+      }
+    },
+    {
+      "url": "/api/preview",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 135,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 1
+      }
+    },
+    {
+      "url": "/api/preview",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 0,
+          "scale": 135,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        }
+      }
+    },
+    {
+      "url": "/api/editor",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 12,
+          "scale": 135,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 1
+      }
+    },
+    {
+      "url": "/api/preview",
+      "body": {
+        "id": "fixture",
+        "source": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\placement-desktop-20261109-213803\\input\\彩色宽幅.png",
+        "settings": {
+          "width": 0,
+          "height": 0,
+          "ppi": 72,
+          "quality": 100,
+          "fit": "cover",
+          "format": "png",
+          "trim": false,
+          "fit_policy": 2,
+          "orientation": "original",
+          "rotation": 0,
+          "brightness": 12,
+          "scale": 135,
+          "offset_x": 15,
+          "offset_y": 10,
+          "input_layout": "folders",
+          "input_exclude": [],
+          "naming": {
+            "folder": "{name}",
+            "image": "{scene:02}",
+            "start": 1
+          }
+        },
+        "scene": 1
+      }
+    }
+  ]
+}
