@@ -1,0 +1,10 @@
+{
+  "version": "0.3.6",
+  "url": "https://taotu.htcerp.app/updates/stable/Taotu-Workbench-Setup-0.3.6-x64.exe",
+  "sha256": "21adc77615e49d68d7c2f685042cefc49099d5571cee96992aac9d6903ca004e",
+  "size": 195092505,
+  "signature_verified": true,
+  "remote_file_verified": true,
+  "published": true,
+  "desktop_updater_live_download_verified": true
+}
