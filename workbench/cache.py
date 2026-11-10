@@ -9,7 +9,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA = 3
+SCHEMA = 4
 
 
 def cache_key(template):
@@ -24,6 +24,7 @@ class DiskCache:
         self.root.mkdir(parents=True, exist_ok=True)
         self.limit_bytes = int(limit_bytes)
         self.active = set()
+        self._users = {}
         self.lock = threading.RLock()
 
     def _remove(self, folder):
@@ -101,10 +102,20 @@ class DiskCache:
     def use(self, manifest):
         key = Path(manifest).parent.name
         with self.lock:
+            self._users[key] = self._users.get(key, 0) + 1
             self.active.add(key)
         try:
             yield
         finally:
             with self.lock:
-                self.active.discard(key)
-                self.clean(all_unused=False)
+                count = self._users[key] - 1
+                if count:
+                    self._users[key] = count
+                else:
+                    del self._users[key]
+                    self.active.discard(key)
+                    try:
+                        self.clean(all_unused=False)
+                    except FileNotFoundError:
+                        # Closing a resident session also works after external cache removal.
+                        pass

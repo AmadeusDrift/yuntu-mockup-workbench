@@ -54,6 +54,8 @@ def create_server(service, port=0):
             route = unquote(urlsplit(self.path).path)
             if route == '/api/state':
                 return self.reply(service.state())
+            if route == '/api/task':
+                return self.reply(service.task_state())
             if route.startswith('/media/'):
                 root = service.root
                 relative = route[len('/media/'):]
@@ -91,7 +93,7 @@ def create_server(service, port=0):
                 elif route == '/api/template':
                     result = service.configure(data['id'], data['scenes'])
                 elif route == '/api/preview':
-                    result = service.preview(data['id'], data['source'], data['settings'], data.get('scene'))
+                    result = service.preview(data['id'], data['source'], data['settings'], data.get('scene'), data.get('draft', False))
                 elif route == '/api/editor':
                     result = service.editor(data['id'], data['source'], data['settings'], data.get('scene',0))
                 elif route == '/api/overview':
@@ -162,6 +164,7 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         pass
     finally:
+        app.close()
         if server:
             server.server_close()
         instance.__exit__(None, None, None)

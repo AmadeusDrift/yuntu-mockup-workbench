@@ -11,7 +11,9 @@ from pathlib import Path
 
 import engine
 import catalog
+import compatibility
 from cache import DiskCache
+from preview_session import PreviewSession, file_identity
 
 DEFAULTS = {'input': '', 'output': '', 'settings': {'width': 0, 'height': 0,
             'ppi': 72, 'quality': 100, 'fit': 'auto', 'format': 'jpg', 'trim': False, 'fit_policy': 2, 'orientation': 'auto', 'rotation': 0, 'brightness': 0,
@@ -37,6 +39,9 @@ class Service:
             self.save('preferences.json',self.preferences)
         self.history = self._read('history.json', [])
         self.cache = DiskCache(self.root / 'cache', self._read('cache-settings.json', {}).get('limit_bytes', 10 * 1024**3))
+        self.preview_session = PreviewSession(self.cache)
+        self._verified_source = None
+        self._snapshot_id = 0
         self.task = {'status': 'idle', 'kind': '', 'message': '选择模板，开始套图。', 'progress': 0,
                      'total': 0, 'results': [], 'preview': [], 'error': ''}
         self.control = None
@@ -52,9 +57,11 @@ class Service:
 
     def state(self):
         with self.lock:
+            self._snapshot_id += 1
             result = copy.deepcopy({'templates': self.templates, 'preferences': self.preferences,
-                                    'history': self.history, 'task': self.task})
+                                    'history': self.history, 'task': self.task, 'snapshot_id': self._snapshot_id})
         for template in result['templates']:
+            template['compatibility'] = compatibility.current(template) or {'status':'pending','issues':[],'warnings':[]}
             try:
                 stat = Path(template['path']).stat()
                 template['stale'] = (stat.st_size, stat.st_mtime_ns) != (template['signature']['bytes'], template['signature']['mtime'])
@@ -62,6 +69,15 @@ class Service:
                 template['stale'] = True
         result['cache'] = self.cache.summary()
         return result
+
+    def task_state(self):
+        with self.lock:
+            self._snapshot_id += 1
+            return {'task': copy.deepcopy(self.task), 'snapshot_id': self._snapshot_id}
+
+    def close(self):
+        self.preview_session.close()
+        self._verified_source = None
 
     def update(self, **values):
         with self.lock:
@@ -90,10 +106,12 @@ class Service:
                 final_status = 'failed'
                 error = message = str(exc)
             finally:
-                gc.collect()
+                if kind not in ('editor', 'preview'):
+                    gc.collect()
                 with self.lock:
                     try:
-                        self.finish_history()
+                        if kind not in ('editor', 'preview'):
+                            self.finish_history()
                     except Exception as exc:
                         final_status = 'failed'
                         error = (error + '\n' if error else '') + '批次记录保存失败：' + str(exc)
@@ -136,7 +154,8 @@ class Service:
             for i, path in enumerate(dict.fromkeys(paths)):
                 self.update(progress=i, total=len(paths), message='正在读取 ' + Path(path).name)
                 try:
-                    item = catalog.inspect(path, self.root / 'thumbs', lambda message: self.update(message=message))
+                    previous = next((copy.deepcopy(t) for t in self.templates if t.get('path') and Path(t['path']).resolve() == Path(path).resolve()), None)
+                    item = catalog.inspect(path, self.root / 'thumbs', lambda message: self.update(message=message), previous=previous)
                     with self.lock:
                         old = next((t for t in self.templates if t['id'] == item['id']), None)
                         if old and old['digest'] == item['digest']:
@@ -146,6 +165,7 @@ class Service:
                                 previous = by_id.get(scene['id'])
                                 if previous:
                                     scene.update(mode=previous['mode'], targets=previous['targets'])
+                                    if 'artwork_roles' in previous:scene['artwork_roles']=copy.deepcopy(previous['artwork_roles'])
                             order = {scene['id']: index for index, scene in enumerate(old['scenes'])}
                             item['scenes'].sort(key=lambda scene: order.get(scene['id'], len(order)))
                         self.templates = [t for t in self.templates if t['id'] != item['id']] + [item]
@@ -164,14 +184,31 @@ class Service:
             self.idle_required()
             template = self.find(ident)
             template['scenes'] = catalog.updated_scenes(template, scenes)
+            self.close()
             self.save('templates.json', self.templates)
         return {'ok': True}
 
     def manifest(self, template):
-        if catalog.fingerprint(template['path'])['sha256'] != template['digest']:
-            raise ValueError('PSD 已修改，请重新导入并核对场景设置')
+        compatibility.require(template)
+        identity = (file_identity(template['path']), template['digest'])
+        if self._verified_source != identity:
+            self.preview_session.close()
+            self._verified_source = None
+            if catalog.fingerprint(template['path'])['sha256'] != template['digest']:
+                raise ValueError('PSD 已修改，请重新导入并核对场景设置')
+            # Do not remember a hash if the file changed after hashing.
+            if file_identity(template['path']) != identity[0]:
+                raise ValueError('PSD 正在修改，请保存完成后重新导入')
+            self._verified_source = identity
+        def save_report(value):
+            template['compatibility'] = value
+            with self.lock:
+                current = next((t for t in self.templates if t['id'] == template['id']), None)
+                if current and compatibility.key(current) == value['key']:
+                    current['compatibility'] = value
+                    self.save('templates.json', self.templates)
         return self.cache.ensure(template, lambda folder: catalog.compile_template(
-            template, folder, lambda message: self.update(message=message)))
+            template, folder, lambda message: self.update(message=message), report=save_report))
 
     @staticmethod
     def input_images(folder, exclude=None):
@@ -230,7 +267,8 @@ class Service:
 
     def save_preferences(self, payload):
         with self.lock:
-            self.idle_required()
+            if self.task.get('kind') not in ('editor', 'preview'):
+                self.idle_required()
             settings=engine.settings_checked(payload.get('settings',self.preferences['settings']))
             input_folder=str(payload.get('input',self.preferences.get('input',''))).strip()
             output_folder=str(payload.get('output',self.preferences.get('output',''))).strip()
@@ -265,6 +303,7 @@ class Service:
 
     def editor(self, ident, source, settings, scene=0):
         template = copy.deepcopy(self.find(ident))
+        compatibility.require(template)
         settings = engine.settings_checked(settings)
         self.checked_scene(template, scene)
         if scene is None:raise ValueError('请选择需要编辑的场景')
@@ -278,8 +317,8 @@ class Service:
         def work():
             from PIL import ImageOps, Image
             manifest = self.manifest(template)
-            with self.cache.use(manifest):
-                data = json.loads(manifest.read_text(encoding='utf-8'))
+            with self.preview_session.use(manifest) as renderer:
+                data = renderer.data
                 def slots(ops):
                     for op in ops:
                         if op['kind']=='slot':yield op
@@ -315,10 +354,13 @@ class Service:
                 finally:artwork.close()
         return self.start('editor',work)
 
-    def preview(self, ident, source, settings, scene=None):
+    def preview(self, ident, source, settings, scene=None, draft=False):
         template = copy.deepcopy(self.find(ident))
+        compatibility.require(template)
         settings = engine.settings_checked(settings)
         self.checked_scene(template,scene)
+        if type(draft) is not bool or (draft and scene is None):
+            raise ValueError('快速预览需要选择一个场景，并使用有效的预览模式')
         requested_source = str(source)
         source = Path(source)
         if source.is_dir():
@@ -332,8 +374,7 @@ class Service:
             manifest = self.manifest(template)
             from artwork_sources import signature as artwork_signature
             preview_stamp=list(artwork_signature(source))
-            with self.cache.use(manifest):
-                renderer = engine.Renderer(manifest)
+            with self.preview_session.use(manifest, draft=draft) as renderer:
                 fit_info=[]
                 native_sizes=set()
                 def collect(ops):
@@ -341,7 +382,7 @@ class Service:
                         if op['kind']=='slot':native_sizes.add(tuple(op['native_size']))
                         if op.get('ops'):collect(op['ops'])
                         if op.get('base_op'):collect([op['base_op']])
-                for candidate_scene in renderer.data['scenes']:
+                for candidate_scene in self.preview_session.renderer.data['scenes']:
                     if not candidate_scene.get('fixed'):collect(candidate_scene['ops'])
                 if source.is_file() and native_sizes and (settings['fit']=='auto' or 'orientation' in settings):
                     artwork=engine.load_image(source,preserve_alpha=True)
@@ -359,20 +400,24 @@ class Service:
                 destination.mkdir()
                 previews = []
                 indices=list(range(len(renderer.data['scenes']))) if scene is None else [scene]
-                for position, (name, image) in enumerate(renderer.render(source, settings,scene_indices=indices)):
+                render_settings = dict(settings)
+                if draft and max(settings['width'], settings['height']) > 720:
+                    ratio = 720 / max(settings['width'], settings['height'])
+                    render_settings.update(width=max(1, round(settings['width'] * ratio)),
+                                           height=max(1, round(settings['height'] * ratio)))
+                for position, (name, image) in enumerate(renderer.render(source, render_settings,scene_indices=indices)):
                     i=indices[position]
                     if self.control.stop.is_set():
                         image.close()
                         break
                     # Preview is rendered with export settings so framing matches final output.
-                    image.save(destination / f'{i}.png')
+                    image.save(destination / f'{i}.png', compress_level=1 if draft else 6)
                     previews.append({'name': name, 'url': f'/media/previews/{destination.name}/{i}.png','scene_index':i})
                     image.close()
                     self.update(progress=position + 1, total=len(indices), message='生成场景 ' + name)
-                self.update(preview=previews, preview_signature=preview_stamp, preview_manifest=hashlib.sha256(manifest.read_bytes()).hexdigest(), preview_fit=fit_info, preview_template_id=template['id'], preview_settings=settings,
+                self.update(preview=previews, preview_quality='draft' if draft else 'full', preview_signature=preview_stamp, preview_manifest=hashlib.sha256(manifest.read_bytes()).hexdigest(), preview_fit=fit_info, preview_template_id=template['id'], preview_settings=settings,
                             preview_source=requested_source, preview_scenes=[
                                 {k: s.get(k,{}) for k in ('id', 'mode', 'targets', 'artwork_roles')} for s in template['scenes']])
-                del renderer
             # Keep recent previews only; paths checked before any recursive removal.
             import shutil
             folders = sorted((p for p in (self.root / 'previews').iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -383,6 +428,7 @@ class Service:
 
     def overview(self, ident, sources, settings, scene=None):
         template=copy.deepcopy(self.find(ident))
+        compatibility.require(template)
         settings=engine.settings_checked(settings)
         if not isinstance(sources,list) or not 1<=len(sources)<=100:raise ValueError('请选择 1–100 张印花')
         paths=list(dict.fromkeys(str(Path(p).resolve()) for p in sources))
@@ -408,7 +454,7 @@ class Service:
                 for source in paths:
                     stamp=signature(source);targets={}
                     with self.lock:previous=copy.deepcopy(self.task)
-                    reusable=(previous.get('preview_signature')==list(stamp) and previous.get('preview_manifest')==manifest_digest and previous.get('preview_template_id')==ident and {k:v for k,v in previous.get('preview_settings',{}).items() if k not in ('naming','input_layout','input_exclude')}==pixel_settings and previous.get('preview_source')==source and previous.get('preview_scenes')==expected_scenes)
+                    reusable=(previous.get('preview_quality', 'full')=='full' and previous.get('preview_signature')==list(stamp) and previous.get('preview_manifest')==manifest_digest and previous.get('preview_template_id')==ident and {k:v for k,v in previous.get('preview_settings',{}).items() if k not in ('naming','input_layout','input_exclude')}==pixel_settings and previous.get('preview_source')==source and previous.get('preview_scenes')==expected_scenes)
                     for index in indices:
                         if self.control.stop.is_set():return
                         key=hashlib.sha256(json.dumps([manifest_digest,str(manifest.parent),source,stamp,pixel_settings,index],sort_keys=True).encode()).hexdigest()
@@ -462,6 +508,7 @@ class Service:
         templates = [copy.deepcopy(self.find(i)) for i in dict.fromkeys(ids)]
         if not templates:
             raise ValueError('请选择模板')
+        for template in templates:compatibility.require(template)
         settings = engine.settings_checked(settings)
         if not resume:
             settings.setdefault('input_layout','folders')
@@ -480,16 +527,27 @@ class Service:
             catalog.updated_scenes(template, template['scenes'])
         with self.lock:
             self.idle_required()
-            output.mkdir(parents=True,exist_ok=True)
         def work():
+            # Verify every template before creating any batch output. An invalid
+            # second template must not leave the first half of a batch exported.
+            self.close()
+            for template in templates:
+                if self.control.stop.is_set():return
+                self._verified_source = None
+                self.update(message='检查模板兼容性：' + template['name'])
+                self.manifest(template)
+            output.mkdir(parents=True,exist_ok=True)
             with self.lock:
                 self.preferences = dict(input=str(input_folder), output=str(output), settings=settings, limit=limit, preferences_version=2)
                 self.save('preferences.json', self.preferences)
+            # Export independently verifies sources and does not retain an interactive renderer.
+            self.close()
             count = min(limit, len(images)) if limit else len(images)
             results = []
             for index, template in enumerate(templates):
                 if self.control.stop.is_set():
                     break
+                self._verified_source = None
                 manifest = self.manifest(template)
                 template_output = output / engine.safe_name(template['name'])
                 template_output.mkdir(exist_ok=True)
@@ -560,10 +618,12 @@ class Service:
                 limit_bytes = int(limit_bytes)
                 if not 64 * 1024**2 <= limit_bytes <= 1024**4:
                     raise ValueError('缓存容量应在 64 MB 到 1 TB 之间')
+                self.close()
                 self.cache.limit_bytes = limit_bytes
                 self.save('cache-settings.json', {'limit_bytes': limit_bytes})
                 self.cache.clean(all_unused=False)
             elif action == 'clean':
+                self.close()
                 self.cache.clean()
             else:
                 raise ValueError('缓存操作无效')
@@ -572,6 +632,7 @@ class Service:
     def remove(self, ident):
         with self.lock:
             self.idle_required()
+            self.close()
             self.templates = [t for t in self.templates if t['id'] != ident]
             self.save('templates.json', self.templates)
         return {'ok': True}

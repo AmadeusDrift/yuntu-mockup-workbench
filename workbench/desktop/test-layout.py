@@ -28,14 +28,17 @@ cache=data/'cache'/cache_key(template);cache.mkdir(parents=True)
 ops=[dict(kind='slot',artwork_role=role,native_size=[20,20],quad=[[i*20,0],[(i+1)*20,0],[(i+1)*20,20],[i*20,20]],opacity=255) for i,role in enumerate(['left','center','right'])]
 (cache/'template.json').write_text(json.dumps(dict(version=4,workbench=True,scenes=[dict(name=str(i),width=60,height=20,slots=3,ops=ops) for i in range(1,8)])),encoding='utf-8')
 (cache/'cache-meta.json').write_text(json.dumps(dict(name='fixture',last_used=time.time())),encoding='utf-8')
-target=root/'release/套图工作台-v0.3.4';env=dict(os.environ);env.pop('ELECTRON_RUN_AS_NODE',None)
+version=json.loads((root/'workbench/desktop/package.json').read_text(encoding='utf-8'))['version']
+target=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/('release/套图工作台-v'+version)
+env=dict(os.environ);env.pop('ELECTRON_RUN_AS_NODE',None)
 log=(run/'desktop.log').open('wb');process=subprocess.Popen([str(target/'套图工作台.exe'),'--data-dir='+str(data),'--remote-debugging-port=9342'],env=env,stdout=log,stderr=log)
 try:
  for _ in range(150):
   if (data/'desktop-status.json').exists():break
   if process.poll() is not None:raise RuntimeError('Desktop exited')
   time.sleep(.2)
- subprocess.run([r'C:\Users\12079\AppData\Local\Programs\node-v24.21.0-win-x64\node.exe',str(root/'workbench/desktop/test-layout.cjs'),str(data),str(run),str(target/'套图工作台.exe')],check=True,timeout=90)
+ checked=subprocess.run([r'C:\Users\12079\AppData\Local\Programs\node-v24.21.0-win-x64\node.exe',str(root/'workbench/desktop/test-layout.cjs'),str(data),str(run),str(target/'套图工作台.exe')],timeout=90,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,encoding='utf-8')
+ (run/'node-test.log').write_text(checked.stdout,encoding='utf-8');print(checked.stdout,flush=True);checked.check_returncode()
  print('PASS: template layout and selection stability')
 finally:
  installer_helper.close_applications(target,data,30);process.wait(timeout=15);log.close()

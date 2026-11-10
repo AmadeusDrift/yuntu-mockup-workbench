@@ -12,13 +12,27 @@ let input = '', output = '', source = '', settings = {width:0,height:0,ppi:72,qu
 let customSize = {width:1254,height:1254}, lastTaskSignature = '';
 let initialized = false, busyRequest = false, connected = false, catalogSignature = '', previewSignature = '', toastTimer;
 let artworkFiles = [], artworkTotal = 0, artworkOffset = 0, artworkFolder = '', artworkLoading = false, artworkError = '', artworkRequest = 0;
+let artworkPages=new Map(), artworkIndices=new Map(), sampleIndex=-1, sampleTargetIndex=-1, sampleRequest=0, sampleLoading=false;
 let editorEnabled=false, editorSceneIndex=0, editorBase=null, editorImage=null, editorBaseKey='', editorAttemptKey='', editorObservedKey='', editorPending=false, editorTimer, editorDrag=null, editorFlight=null;
+let editorDesired=null, editorSettleTimer, editorRangePointer=null, editorPixels=null, editorToneCanvas=null, editorToneAmount=null;
+let editorRecovering=false, editorRecoveryVersion=0;
+let displayedPreview=null, previewLoadToken=0, previewSequence=0, latestSnapshot=-1, taskPollTimer, taskPolling=false;
 let sceneSettingsOpen = false, advancedOpen = false, preferenceTimer, preferenceRequest=Promise.resolve();
 let customFolderRule = false, customImageRule = false, draggedScene = null, imageItems = [], imageIndex = 0;
 const titles = {workbench:'套图工作台', templates:'模板管理', history:'批次记录', cache:'缓存管理'};
-const blocked = () => !!window.workbenchUpdateInstalling || !connected || activeStatuses.includes(state.task?.status) || busyRequest;
+const blocked = () => !!window.workbenchUpdateInstalling || !connected || activeStatuses.includes(state.task?.status) || busyRequest || !!editorFlight || editorRecovering;
+const editorBlocked = () => !!window.workbenchUpdateInstalling || !connected || busyRequest || compatibilityBlocked(currentTemplate()) || (activeStatuses.includes(state.task?.status)&&!['editor','preview'].includes(state.task?.kind));
 const currentTemplate = () => state.templates.find((t) => t.id === selectedId);
 const scenesFor = (template) => sceneDraft.get(template.id) || template.scenes || [];
+function compatibilityBlocked(template){return !!template&&(!!template.stale||template.compatibility?.status==='blocked');}
+function renderCompatibility(template){
+  if(!template)return '';
+  const report=template.compatibility;
+  if(report?.status==='blocked')return `<div class="notice warning compatibility-report" role="alert"><div><strong>此模板暂不能套图</strong><p>请处理下面列出的图层后重新导入，或在场景设置中跳过对应场景。</p><ul class="warning-list">${(report.issues||[]).map(issue=>`<li>${escapeHTML(issue.message)}</li>`).join('')}</ul><button data-action="refresh-template" data-edit>重新检查模板</button></div></div>`;
+  if(!report||report.status==='pending')return '<p class="preview-scope">首次使用前会自动检查模板兼容性，完成后复用缓存。</p>';
+  if(report.warnings?.length)return `<div class="notice warning compatibility-report"><div><strong>可以套图，请先核对以下效果</strong><ul class="warning-list">${report.warnings.map(message=>`<li>${escapeHTML(message)}</li>`).join('')}</ul></div></div>`;
+  return '';
+}
 function notify(message, error = false) {
   clearTimeout(toastTimer);
   $('#toast').className = `toast${error ? ' error' : ''}`;
@@ -59,17 +73,20 @@ function renderPage() {
   const sameStep=$('.workbench-page')?.dataset.workflowStep===String(workflowStep);
   const scrollSelectors=['.template-cards','#preview-content','.scene-list','#scene-settings',...(sameStep?['.editor-panel']:[])];
   const scrollPositions=scrollSelectors.map(selector=>[selector,$(selector)?.scrollTop||0]);
+  const sampleScrollLeft=$('#sample-navigator .sample-strip')?.scrollLeft||0;
   const active=document.activeElement;
   const focusAttribute=['data-select-template','data-configure-template','data-target-scene','data-scene-mode'].find(name=>active?.hasAttribute(name));
   const focusValue=focusAttribute?active.getAttribute(focusAttribute):null;
   $('#page-content').innerHTML = ({workbench:renderWorkbench,templates:renderTemplates,history:renderHistory,cache:renderCache}[page])();
   updateLocks(); filterTemplates();
-  paintEditor(); observeEditor();
+  paintEditor(); observeEditor();paintPreviewStatus();
   if(focusAttribute){
     const replacement=[...document.querySelectorAll(`[${focusAttribute}]`)].find(el=>el.getAttribute(focusAttribute)===focusValue&&(!active.value||el.value===active.value));
     replacement?.focus({preventScroll:true});
   }
   for(const [selector,top] of scrollPositions)if($(selector))$(selector).scrollTop=top;
+  const sampleStrip=$('#sample-navigator .sample-strip');if(sampleStrip)sampleStrip.scrollLeft=sampleScrollLeft;
+  revealSampleThumbnail();
 }
 function templateName(template) {
   const name=template.name.replace(/\.psd$/i,'').replace(/^\d+[_-]/,'');
@@ -88,6 +105,55 @@ function renderArtworks() {
   if(!input.trim()) return '<div class="artwork-empty">选择文件夹后自动读取子目录；支持任意名称、任意数量的印花，可按子文件夹分款。</div>';
   if(!artworkFiles.length) return `<div class="artwork-empty">没有可用图片${artworkExcluded.length?'，部分图片已按关键词排除，请调整上方规则':'，请选择其他印花文件夹'}。</div>`;
   return `<div class="artwork-summary"><span>共 <strong>${artworkTotal}</strong> 项印花</span><small>每张印花独立套图 · 点击预览</small></div>${artworkExcluded.length?`<details class="excluded-artworks"><summary>已按关键词排除 ${artworkExcluded.length}${artworkExcluded.length===100?'+':''} 张图片</summary><p>${artworkExcluded.map(escapeHTML).join('<br>')}</p><small>若有需要处理的图片，请修改上方排除关键词。</small></details>`:''}<div class="artwork-grid">${artworkFiles.map(file=>`<div class="artwork-choice"><label class="overview-check"><input type="checkbox" data-overview-artwork="${attr(file.path)}" ${overviewSelected.has(file.path)?'checked':''} data-edit>加入总览</label><button class="artwork-tile ${file.path===source?'selected':''}" data-artwork="${attr(file.path)}" data-edit aria-pressed="${file.path===source}" title="${attr(file.name)}"><span class="artwork-image"><img src="${attr(file.url)}" alt="${attr(file.name)}" loading="lazy">${file.path===source?'<span class="artwork-check">✓</span>':''}</span><span class="artwork-name">${escapeHTML(file.name)}${file.kind==='triptych'?'<small>左 · 中 · 右（一套）</small>':''}</span></button></div>`).join('')}</div>${artworkTotal>40?`<div class="artwork-pagination"><button data-action="artworks-prev" ${artworkOffset===0?'disabled':''} data-edit>上一页</button><small>${artworkOffset+1}–${Math.min(artworkOffset+40,artworkTotal)} / ${artworkTotal}</small><button data-action="artworks-next" ${artworkOffset+40>=artworkTotal?'disabled':''} data-edit>下一页</button></div>`:''}`;
+}
+function renderSampleNavigator(){
+  const offset=Math.max(0,Math.floor(Math.max(0,sampleIndex)/40)*40),files=artworkPages.get(offset)||artworkFiles;
+  const filename=source.split(/[\\/]/).pop()||'请选择印花';
+  return `<section id="sample-navigator" class="sample-navigator" aria-label="切换预览印花"><div class="sample-heading"><div><small>预览样本 · 全批统一参数</small><strong title="${attr(source)}">${escapeHTML(filename)}</strong></div><span id="sample-position">${sampleIndex<0?'外部图片':sampleIndex+1} / ${artworkTotal}</span></div><div class="sample-navigation"><button data-sample-step="-1" data-edit aria-label="上一张印花">← 上一张</button><p>${sampleLoading?'正在读取下一页印花…':'切换仅更换预览样本，整批印花仍全部导出。'}</p><button data-sample-step="1" data-edit aria-label="下一张印花">下一张 →</button></div><div class="sample-strip" role="group" aria-label="印花缩略图">${files.map((file,i)=>`<button class="sample-thumb ${file.path===source?'selected':''}" data-sample-artwork="${attr(file.path)}" data-sample-index="${artworkIndices.get(file.path)??offset+i}" data-edit aria-pressed="${file.path===source}" title="${attr(file.name)}"><img src="${attr(file.url)}" alt="${attr(file.name)}" loading="lazy"><span>${(artworkIndices.get(file.path)??offset+i)+1}</span></button>`).join('')}</div><p class="global-settings-note">位置、缩放、亮度与适配使用同一套设置，对本批所有印花生效。</p></section>`;
+}
+function paintSampleNavigator(){
+  const section=$('#sample-navigator');if(!section)return;
+  const panel=$('.editor-panel'),top=panel?.scrollTop;
+  const strip=section.querySelector('.sample-strip'),left=strip?.scrollLeft||0;
+  section.outerHTML=renderSampleNavigator();const replacement=$('#sample-navigator .sample-strip');if(replacement)replacement.scrollLeft=left;
+  revealSampleThumbnail();
+  if(panel)panel.scrollTop=top;
+  updateLocks();
+}
+function revealSampleThumbnail(){
+  const strip=$('#sample-navigator .sample-strip'),selected=$('#sample-navigator .sample-thumb.selected');
+  if(!strip?.clientWidth||!selected)return;
+  const viewport=strip.getBoundingClientRect(),thumb=selected.getBoundingClientRect();
+  const left=viewport.left+(strip.clientLeft||0),right=left+strip.clientWidth;
+  if(thumb.left<left)strip.scrollLeft+=thumb.left-left;
+  else if(thumb.right>right)strip.scrollLeft+=thumb.right-right;
+}
+function updateSampleSelection(){
+  const label=$('.preview-selected strong');if(label){label.textContent=source.split(/[\\/]/).pop()||'还没有选择印花';label.title=source;}
+  document.querySelectorAll('[data-artwork]').forEach(button=>{const selected=button.dataset.artwork===source;button.classList.toggle('selected',selected);button.setAttribute('aria-pressed',String(selected));const check=button.querySelector('.artwork-check');if(check&&!selected)check.remove();});
+  paintSampleNavigator();paintEditor();paintPreviewStatus();updateWorkflow();
+}
+function selectSample(path,index=artworkIndices.get(path)??-1){
+  source=path;sampleIndex=index;sampleTargetIndex=index;sampleRequest++;sampleLoading=false;
+  updateSampleSelection();observeEditor();
+}
+async function stepSample(delta){
+  if(editorBlocked()||!artworkTotal)return;
+  const index=Math.max(0,Math.min(artworkTotal-1,(sampleTargetIndex<0?-1:sampleTargetIndex)+delta)),offset=Math.floor(index/40)*40,token=++sampleRequest,folder=input.trim();
+  sampleTargetIndex=index;sampleLoading=!artworkPages.has(offset);paintSampleNavigator();
+  try{
+    let files=artworkPages.get(offset);
+    if(!files){
+      const data=await request('/api/artworks',{folder,offset,limit:40,exclude:settings.input_exclude});
+      if(token!==sampleRequest||folder!==input.trim())return;
+      files=data.files||[];artworkPages.set(offset,files);files.forEach((file,i)=>artworkIndices.set(file.path,offset+i));artworkTotal=data.total||0;
+    }
+    if(token!==sampleRequest)return;
+    const file=files[index-offset];if(!file)throw new Error('这张印花已不在列表中，请重新读取文件夹。');
+    artworkFiles=files;artworkOffset=offset;
+    if($('#artwork-browser'))$('#artwork-browser').innerHTML=renderArtworks();
+    selectSample(file.path,index);
+  }catch(error){if(token===sampleRequest){sampleTargetIndex=sampleIndex;sampleLoading=false;paintSampleNavigator();notify(error.message,true);}}
 }
 function renderAdvanced() {
   return `<details class="advanced-settings" id="advanced-settings" ${advancedOpen?'open':''}><summary>高级设置 <small>导出尺寸、格式、图片质量</small></summary><p class="field-help">默认沿用 PSD 原尺寸。需要统一输出尺寸时，再设置宽度和高度。</p><label class="check-label"><input type="checkbox" data-original-size ${settings.width===0&&settings.height===0?'checked':''} data-edit>沿用 PSD 原始尺寸与比例</label><div class="form-grid export-settings"><label>导出宽度 · px<input type="number" min="1" max="8192" data-setting="width" data-dimension value="${settings.width||customSize.width}" data-edit></label><label>导出高度 · px<input type="number" min="1" max="8192" data-setting="height" data-dimension value="${settings.height||customSize.height}" data-edit></label><label>导出格式<select data-setting="format" data-edit>${options([['jpg','JPG'],['png','PNG']],settings.format)}</select></label><label>图片质量 · 1–100<input type="number" min="1" max="100" data-setting="quality" value="${attr(settings.quality)}" data-edit></label><label>分辨率 · PPI<input type="number" min="1" max="2400" data-setting="ppi" value="${attr(settings.ppi)}" data-edit></label><label class="span-two">本批处理上限 · 0 为全部<input type="number" min="0" data-model="limit" value="${attr(limit)}" data-edit></label></div></details>`;
@@ -115,22 +181,32 @@ const clampPlacement=(key,value)=>Math.round(Math.max(key==='scale'?10:-100,Math
 function editorScenes(){return currentTemplate()?scenesFor(currentTemplate()).filter(scene=>scene.mode!=='skip'):[];}
 function editorKey(){
   const scenes=editorScenes();if(editorSceneIndex>=scenes.length)editorSceneIndex=0;
-  return JSON.stringify([selectedId,source.trim()||input.trim(),editorSceneIndex,scenes,['fit','fit_policy','orientation','rotation','trim','brightness'].map(key=>settings[key])]);
+  return JSON.stringify([templateIdentity(),source.trim()||input.trim(),editorSceneIndex,scenes,['fit','fit_policy','orientation','rotation','trim'].map(key=>settings[key])]);
+}
+function previewSceneSettings(){return currentTemplate()?scenesFor(currentTemplate()).map(({id,mode,targets,artwork_roles})=>({id,mode,targets,artwork_roles:artwork_roles||{}})):[];}
+function templateIdentity(){const template=currentTemplate();return [selectedId,template?.digest,template?.signature,previewSceneSettings()];}
+function pixelSettings(value=settings){return Object.fromEntries(Object.keys(value).sort().filter(key=>!['naming','input_layout','input_exclude'].includes(key)).map(key=>[key,value[key]]));}
+function currentPreviewKey(allScenes=false){return JSON.stringify([templateIdentity(),source.trim()||input.trim(),allScenes?null:editorSceneIndex,pixelSettings()]);}
+function makeEditorDesired(interactive=false,allScenes=false){
+  const body={id:selectedId,source:source.trim()||input.trim(),settings:structuredClone(settings),draft:interactive};
+  if(!allScenes)body.scene=editorSceneIndex;
+  return {key:currentPreviewKey(allScenes),baseKey:editorKey(),quality:interactive?'draft':'full',allScenes,body};
 }
 function renderPlacementEditor(){
   const scenes=editorScenes();if(editorSceneIndex>=scenes.length)editorSceneIndex=0;
-  return `<section class="placement-editor" aria-label="印花位置编辑"><div class="placement-editor-heading"><h3>拖动与缩放印花</h3><button data-action="load-editor" data-edit>${editorEnabled?'重新加载母稿':'加载印花编辑'}</button></div><p class="field-help">母稿正面 · 最终边缘按 PSD 蒙版裁切</p><label>编辑并预览场景<select id="editor-scene" data-edit>${scenes.map((scene,i)=>`<option value="${i}" ${i===editorSceneIndex?'selected':''}>${escapeHTML(scene.name)}${scene.mode==='fixed'?' · 固定场景':''}</option>`).join('')}</select></label><div id="placement-stage" class="placement-stage" tabindex="0" role="group" aria-label="拖动印花调整位置，方向键微调"><canvas id="placement-canvas"></canvas><span class="placement-center" aria-hidden="true"></span><div id="placement-bounds" class="placement-bounds" hidden></div><button type="button" class="placement-resize" data-resize-artwork aria-label="拖动等比缩放印花" title="拖动等比缩放" data-edit hidden></button><p id="placement-placeholder">${editorEnabled?'正在准备母稿…':'加载印花后，可直接拖动调整位置'}</p></div><p id="placement-status" class="field-help" role="status"></p><div class="placement-controls">${[['scale','缩放',10,300],['offset_x','水平位置',-100,100],['offset_y','垂直位置',-100,100]].map(([key,label,min,max])=>`<label>${label} · %<div><input type="range" min="${min}" max="${max}" step="0.1" value="${settings[key]}" data-placement="${key}" aria-label="${label}" data-edit><input type="number" min="${min}" max="${max}" step="0.1" value="${settings[key]}" data-placement="${key}" aria-label="${label}百分比" data-edit></div></label>`).join('')}</div><div class="placement-actions"><button data-action="placement-center" data-edit>居中</button><button data-action="placement-reset" data-edit>重置位置与缩放</button></div><p class="field-help">拖动图案移动，拖动右下角等比缩放；松手后更新当前场景。位置与缩放对本批次所有印花和所选模板生效。</p></section>`;
+  return `<section class="placement-editor" aria-label="印花位置编辑"><div class="placement-editor-heading"><h3>拖动与缩放印花</h3><button data-action="load-editor" data-edit>${editorEnabled?'重新加载母稿':'加载印花编辑'}</button></div><p class="field-help">母稿正面 · 最终边缘按 PSD 蒙版裁切</p><label>编辑并预览场景<select id="editor-scene" data-edit>${scenes.map((scene,i)=>`<option value="${i}" ${i===editorSceneIndex?'selected':''}>${escapeHTML(scene.name)}${scene.mode==='fixed'?' · 固定场景':''}</option>`).join('')}</select></label><div id="placement-stage" class="placement-stage" tabindex="0" role="group" aria-label="拖动印花调整位置，方向键微调"><canvas id="placement-canvas"></canvas><span class="placement-center" aria-hidden="true"></span><div id="placement-bounds" class="placement-bounds" hidden></div><button type="button" class="placement-resize" data-resize-artwork aria-label="拖动等比缩放印花" title="拖动等比缩放" data-edit hidden></button><p id="placement-placeholder">${editorEnabled?'正在准备母稿…':'加载印花后，可直接拖动调整位置'}</p></div><p id="placement-status" class="field-help" role="status"></p><div class="placement-controls">${[['scale','缩放',10,300],['offset_x','水平位置',-100,100],['offset_y','垂直位置',-100,100]].map(([key,label,min,max])=>`<label>${label} · %<div><input type="range" min="${min}" max="${max}" step="0.1" value="${settings[key]}" data-placement="${key}" aria-label="${label}" data-edit><input type="number" min="${min}" max="${max}" step="0.1" value="${settings[key]}" data-placement="${key}" aria-label="${label}百分比" data-edit></div></label>`).join('')}</div><div class="placement-actions"><button data-action="placement-center" data-edit>居中</button><button data-action="placement-reset" data-edit>重置位置与缩放</button></div><p class="field-help">拖动图案移动，拖动右下角等比缩放；拖动时更新快速预览，停止后自动生成完整效果。位置与缩放对本批次所有印花和所选模板生效。</p></section>`;
 }
-function paintEditor(activeField){
+function paintEditor(activeField=document.activeElement){
   document.querySelectorAll('[data-placement]').forEach(field=>{if(field!==activeField)field.value=settings[field.dataset.placement];});
   const stage=$('#placement-stage'),canvas=$('#placement-canvas');if(!stage||!canvas)return;
   const ready=editorBase&&editorImage?.complete&&editorImage.naturalWidth&&editorBaseKey===editorKey();
-  stage.classList.toggle('ready',!!ready);stage.classList.toggle('locked',blocked());
+  stage.classList.toggle('ready',!!ready);stage.classList.toggle('locked',editorBlocked());
   $('#placement-placeholder').hidden=!!ready;
-  $('#placement-placeholder').textContent=!editorEnabled?'加载印花后，可直接拖动调整位置':editorAttemptKey===editorKey()&&!editorFlight&&!ready?'母稿暂不可编辑，请重新加载':'正在准备母稿…';
+  $('#placement-placeholder').textContent=editorScenes()[editorSceneIndex]?.mode==='fixed'?'这是固定场景，没有可移动的印花层':!editorEnabled?'加载印花后，可直接拖动调整位置':editorAttemptKey===editorKey()&&!editorFlight&&!ready?'母稿暂不可编辑，请重新加载':'正在准备母稿…';
+  const reload=$('[data-action="load-editor"]');if(reload)reload.textContent=editorEnabled?'重新加载母稿':'加载印花编辑';
   $('#placement-bounds').hidden=!ready;
   $('[data-resize-artwork]').hidden=!ready;
-  $('#placement-status').textContent=editorPending?(blocked()?'等待当前任务完成后更新预览…':'等待更新当前场景预览…'):ready?'拖动即时调整 · 松手更新场景预览':'';
+  $('#placement-status').textContent=editorScenes()[editorSceneIndex]?.mode==='fixed'?'固定场景 · 没有可移动的印花层':editorPending||editorFlight?'正在更新效果 · 可继续拖动、缩放和切换印花':ready?'全批统一参数 · 拖动时快速预览，停止后自动精修':'';
   if(!ready)return;
   const b=editorBase,w=b.stage_width,h=b.stage_height,s=settings.scale/100;
   stage.style.aspectRatio=`${w} / ${h}`;stage.style.width=`min(100%, ${400*w/h}px)`;
@@ -138,54 +214,109 @@ function paintEditor(activeField){
   const ratio=Math.min(1,1400/Math.max(w,h));canvas.width=Math.max(1,Math.round(w*ratio));canvas.height=Math.max(1,Math.round(h*ratio));
   const ctx=canvas.getContext('2d');ctx.scale(canvas.width/w,canvas.height/h);
   ctx.translate(w/2+settings.offset_x*w/100,h/2+settings.offset_y*h/100);ctx.scale(s,s);ctx.translate(-w/2,-h/2);
-  if(b.affine){ctx.transform(...b.affine);ctx.drawImage(editorImage,0,0);}
-  else ctx.drawImage(editorImage,b.x,b.y,b.width,b.height);
+  const artwork=editorArtworkImage();
+  if(b.affine){ctx.transform(...b.affine);ctx.drawImage(artwork,0,0);}
+  else ctx.drawImage(artwork,b.x,b.y,b.width,b.height);
   const bounds=$('#placement-bounds');bounds.style.left=`${50+(b.x/w*100-50)*s+settings.offset_x}%`;bounds.style.top=`${50+(b.y/h*100-50)*s+settings.offset_y}%`;bounds.style.width=`${b.width/w*100*s}%`;bounds.style.height=`${b.height/h*100*s}%`;
   const handle=$('[data-resize-artwork]');handle.style.left=`clamp(0px, calc(${50+((b.x+b.width)/w*100-50)*s+settings.offset_x}% - 22px), calc(100% - 22px))`;handle.style.top=`clamp(0px, calc(${50+((b.y+b.height)/h*100-50)*s+settings.offset_y}% - 22px), calc(100% - 22px))`;
 }
-function scheduleEditor(delay=450){clearTimeout(editorTimer);editorTimer=setTimeout(flushEditor,delay);}
-function queueEditorPreview(){if(!editorEnabled)return;editorPending=true;paintEditor();scheduleEditor();}
-function observeEditor(){
+function brightnessLUT(amount){return Uint8ClampedArray.from({length:256},(_,v)=>{const p=Math.min(v,249)/249;return Math.max(0,Math.min(255,Math.round(v+amount*4*p*(1-p))));});}
+function editorArtworkImage(){
+  if(!settings.brightness)return editorImage;
+  if(!editorPixels){
+    editorToneCanvas=document.createElement('canvas');editorToneCanvas.width=editorImage.naturalWidth;editorToneCanvas.height=editorImage.naturalHeight;
+    const context=editorToneCanvas.getContext('2d',{willReadFrequently:true});context.drawImage(editorImage,0,0);
+    editorPixels=context.getImageData(0,0,editorToneCanvas.width,editorToneCanvas.height);editorToneAmount=null;
+  }
+  if(editorToneAmount!==settings.brightness){
+    const context=editorToneCanvas.getContext('2d'),result=context.createImageData(editorPixels.width,editorPixels.height),lut=brightnessLUT(settings.brightness);
+    for(let i=0;i<editorPixels.data.length;i+=4){for(let c=0;c<3;c++)result.data[i+c]=lut[editorPixels.data[i+c]];result.data[i+3]=editorPixels.data[i+3];}
+    context.putImageData(result,0,0);editorToneAmount=settings.brightness;
+  }
+  return editorToneCanvas;
+}
+// A single flight reserves the backend from POST through acknowledgement and completion.
+// Changes replace only the desired request; the next flight always uses the latest one.
+function scheduleEditor(delay=80){if(editorTimer)return;editorTimer=setTimeout(()=>{editorTimer=null;flushEditor();},delay);}
+function queueEditorPreview(interactive=true,allScenes=false){
   if(!editorEnabled)return;
-  const key=editorKey();if(key!==editorObservedKey){editorObservedKey=key;editorPending=true;paintEditor();scheduleEditor();}
-  else if(editorPending&&!blocked()&&!editorFlight&&!editorDrag)scheduleEditor();
+  editorDesired=makeEditorDesired(interactive,allScenes);editorObservedKey=currentPreviewKey();editorPending=true;
+  clearTimeout(editorSettleTimer);
+  if(interactive)editorSettleTimer=setTimeout(()=>{if(!editorDrag&&editorRangePointer===null)queueEditorPreview(false);},550);
+  paintEditor();paintPreviewStatus();scheduleEditor(interactive?80:0);
+}
+function observeEditor(){
+  if(!editorEnabled&&page==='workbench'&&workflowStep===3&&selectedId&&(source.trim()||input.trim()))editorEnabled=true;
+  if(!editorEnabled)return;
+  const key=currentPreviewKey();if(key!==editorObservedKey)queueEditorPreview(false);
+  else if(editorPending&&!editorBlocked()&&!editorFlight)scheduleEditor(0);
 }
 async function flushEditor(){
-  if(!editorEnabled||blocked()||editorDrag||editorFlight)return;
+  if(!editorEnabled||!editorPending||!editorDesired||editorBlocked()||activeStatuses.includes(state.task?.status)||editorFlight||editorRecovering)return;
   if(!selectedId||!(source.trim()||input.trim())||dirty.has(selectedId)||!editorScenes().length)return;
+  let flight=null;
   try{
-    validateSettings();const key=editorKey(),needsBase=editorBaseKey!==key;
-    if(needsBase&&editorAttemptKey===key)return;
-    const body={id:selectedId,source:source.trim()||input.trim(),settings:structuredClone(settings),scene:editorSceneIndex};
-    if(needsBase){editorAttemptKey=key;editorFlight={key,kind:'editor'};}
-    else {editorPending=false;editorFlight={key,kind:'preview'};}
-    busyRequest=true;updateLocks();
-    // Persist before starting a task: preferences writes require an idle backend.
-    clearTimeout(preferenceTimer);
-    await persistPreferences(body.settings);
-    const flight=editorFlight;
+    validateSettings();const desired=editorDesired,needsBase=!desired.allScenes&&editorScenes()[editorSceneIndex]?.mode!=='fixed'&&editorBaseKey!==desired.baseKey;
+    if(needsBase&&editorAttemptKey===desired.baseKey){editorPending=false;return;}
+    const body=structuredClone(desired.body);
+    if(needsBase){body.settings.brightness=0;delete body.draft;editorAttemptKey=desired.baseKey;}
+    flight=editorFlight={...desired,sequence:++previewSequence,kind:needsBase?'editor':'preview'};editorPending=false;
+    updateLocks();paintPreviewStatus();scheduleTaskPoll();
     const accepted=await request(needsBase?'/api/editor':'/api/preview',body);
     flight.taskId=accepted.task_id;flight.accepted=true;
-    await refresh();
-    // action refreshes state, which may already contain a completed result.
-    if(!activeStatuses.includes(state.task?.status))receiveEditor();
-  }catch(error){editorFlight=null;editorPending=false;notify(error.message,true);}
-  busyRequest=false;updateLocks();paintEditor();observeEditor();
+    receiveEditor();scheduleTaskPoll(0);
+  }catch(error){
+    editorFlight=null;
+    editorPending=!!flight&&!!editorDesired&&(flight.key!==editorDesired.key||flight.quality!==editorDesired.quality);
+    if(flight?.kind==='editor'&&editorAttemptKey===flight.baseKey)editorAttemptKey='';
+    // A lost acknowledgement may still have started work. Confirm server idleness
+    // before dispatching a newer state; a rejected latest state is not retried forever.
+    if(flight){editorRecovering=true;editorRecoveryVersion++;scheduleTaskPoll(0);}
+    if(!editorPending)notify(error.message,true);
+  }
+  updateLocks();paintEditor();paintPreviewStatus();observeEditor();
 }
 function receiveEditor(){
   if(!editorFlight?.accepted||state.task?.task_id!==editorFlight.taskId||activeStatuses.includes(state.task?.status))return;
-  const flight=editorFlight;editorFlight=null;
+  const flight=editorFlight,task=state.task;editorFlight=null;
   if(flight.kind==='editor'){
-    const result=state.task?.editor;
-    if(state.task.status==='done'&&state.task.kind==='editor'&&result?.url&&result.template_id===selectedId&&result.source===(source.trim()||input.trim())&&result.scene===editorSceneIndex&&flight.key===editorKey()){
-      editorBase=result;editorBaseKey=flight.key;editorImage=new Image();
+    const result=task.editor;
+    if(task.status==='done'&&task.kind==='editor'&&result?.url&&result.template_id===selectedId&&result.source===(source.trim()||input.trim())&&result.scene===editorSceneIndex&&flight.baseKey===editorKey()){
+      editorBase=result;editorBaseKey=flight.baseKey;editorImage=new Image();editorPixels=null;editorToneCanvas=null;editorToneAmount=null;
       const image=editorImage;image.onload=()=>{if(editorImage===image)paintEditor();};image.onerror=()=>{if(editorImage===image){editorBaseKey='';notify('无法读取母稿图片，请重新加载。',true);}};image.src=result.url;
-    }else if(flight.key===editorKey()){editorPending=false;}
+      editorPending=true;
+    }else if(flight.baseKey!==editorKey())editorPending=true;
+  }else if(previewMatchesFlight(task,flight)){
+    if(flight.key!==editorDesired?.key||flight.quality!==editorDesired?.quality)editorPending=true;
+    adoptPreview(task,flight);
+  }else if(flight.key!==editorDesired?.key||flight.quality!==editorDesired?.quality){
+    editorPending=true;
   }
-  paintEditor();
+  if(task.status==='failed'&&flight.key===editorDesired?.key){editorPending=false;notify(task.error||'效果预览失败，请重试。',true);}
+  paintEditor();paintPreviewStatus();updateLocks();if(editorPending)scheduleEditor(0);
+}
+function previewMatchesFlight(task,flight){
+  const exact=flight.key===editorDesired?.key&&flight.key===currentPreviewKey(flight.allScenes)&&flight.quality===editorDesired?.quality;
+  // During uninterrupted motion each completed draft can advance the visible image.
+  // It stays explicitly "updating" until its pixels match the current parameters.
+  const following=flight.quality==='draft'&&editorDesired?.quality==='draft'&&!flight.allScenes&&flight.baseKey===editorKey()&&flight.body.scene===editorSceneIndex;
+  return (exact||following)&&task.status==='done'&&task.kind==='preview'&&task.task_id===flight.taskId&&task.preview_quality===flight.quality
+    &&task.preview_template_id===flight.body.id&&task.preview_source===flight.body.source&&JSON.stringify(pixelSettings(task.preview_settings||{}))===JSON.stringify(pixelSettings(flight.body.settings))
+    &&JSON.stringify(task.preview_scenes)===JSON.stringify(previewSceneSettings())&&task.preview?.length>0
+    &&(flight.allScenes?task.preview.length===editorScenes().length:task.preview.length===1&&task.preview[0].scene_index===flight.body.scene);
+}
+async function adoptPreview(task,flight){
+  const token=++previewLoadToken;
+  try{
+    await Promise.all(task.preview.map(item=>new Promise((resolve,reject)=>{const image=new Image();image.onload=resolve;image.onerror=reject;image.src=item.url;})));
+    if(token!==previewLoadToken||!previewMatchesFlight(task,flight)||(flight.sequence??0)<(displayedPreview?.sequence??0))return;
+    displayedPreview={...structuredClone(task),key:flight.key,baseKey:flight.baseKey,sequence:flight.sequence,allScenes:flight.allScenes};
+    updatePreviewContent();paintPreviewStatus();updateWorkflow();
+  }catch{if(token===previewLoadToken)notify('无法读取场景预览，请重试。',true);}
 }
 app.addEventListener('pointerdown',event=>{
-  const stage=event.target.closest('#placement-stage');if(!stage||blocked()||editorBaseKey!==editorKey()||!editorImage?.naturalWidth||event.button!==0)return;
+  if(event.target.matches('input[type="range"][data-placement],#artwork-brightness'))editorRangePointer=event.pointerId;
+  const stage=event.target.closest('#placement-stage');if(!stage||editorBlocked()||editorBaseKey!==editorKey()||!editorImage?.naturalWidth||event.button!==0)return;
   event.preventDefault();const rect=stage.getBoundingClientRect();stage.setPointerCapture(event.pointerId);stage.focus({preventScroll:true});
   editorDrag={pointer:event.pointerId,stage,rect,x:event.clientX,y:event.clientY,offsetX:settings.offset_x,offsetY:settings.offset_y,scale:settings.scale,resize:!!event.target.closest('[data-resize-artwork]')};
   stage.classList.add('dragging');
@@ -196,11 +327,11 @@ app.addEventListener('pointermove',event=>{
     const cx=d.rect.left+d.rect.width*(.5+d.offsetX/100),cy=d.rect.top+d.rect.height*(.5+d.offsetY/100),vx=d.x-cx,vy=d.y-cy;
     settings.scale=clampPlacement('scale',d.scale*((event.clientX-cx)*vx+(event.clientY-cy)*vy)/Math.max(1,vx*vx+vy*vy));
   }else{settings.offset_x=clampPlacement('offset_x',d.offsetX+(event.clientX-d.x)/d.rect.width*100);settings.offset_y=clampPlacement('offset_y',d.offsetY+(event.clientY-d.y)/d.rect.height*100);}
-  paintEditor();
+  queueEditorPreview();
 });
-function finishEditorDrag(event){const d=editorDrag;if(!d||event.pointerId!==d.pointer)return;editorDrag=null;d.stage.classList.remove('dragging');if(d.stage.hasPointerCapture(d.pointer))d.stage.releasePointerCapture(d.pointer);savePreferences();queueEditorPreview();}
+function finishEditorDrag(event){if(editorRangePointer===event.pointerId){editorRangePointer=null;queueEditorPreview(false);}const d=editorDrag;if(!d||event.pointerId!==d.pointer)return;editorDrag=null;d.stage.classList.remove('dragging');if(d.stage.hasPointerCapture(d.pointer))d.stage.releasePointerCapture(d.pointer);savePreferences();queueEditorPreview(false);}
 app.addEventListener('pointerup',finishEditorDrag);app.addEventListener('pointercancel',finishEditorDrag);app.addEventListener('lostpointercapture',finishEditorDrag);
-app.addEventListener('keydown',event=>{if(event.target.id!=='placement-stage'||blocked()||!editorBase||editorBaseKey!==editorKey()||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key))return;event.preventDefault();const key=['ArrowLeft','ArrowRight'].includes(event.key)?'offset_x':'offset_y',delta=(['ArrowLeft','ArrowUp'].includes(event.key)?-1:1)*(event.shiftKey?5:.5);settings[key]=clampPlacement(key,settings[key]+delta);paintEditor();savePreferences();queueEditorPreview();});
+app.addEventListener('keydown',event=>{if(event.target.id!=='placement-stage'||editorBlocked()||!editorBase||editorBaseKey!==editorKey()||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key))return;event.preventDefault();const key=['ArrowLeft','ArrowRight'].includes(event.key)?'offset_x':'offset_y',delta=(['ArrowLeft','ArrowUp'].includes(event.key)?-1:1)*(event.shiftKey?5:.5);settings[key]=clampPlacement(key,settings[key]+delta);paintEditor();savePreferences();queueEditorPreview();});
 function renderWorkbench() {
   const template=currentTemplate();
   return `<div class="workbench-page" data-workflow-step="${workflowStep}">${heading('批量套图','选好素材，确认效果，一次完成整批导出。',`<button data-action="import" data-edit>${icon('plus')} 导入 PSD</button>`)}
@@ -209,9 +340,9 @@ function renderWorkbench() {
     <div class="step-panel" data-step-panel="1" ${workflowStep!==1?'hidden':''}><div class="panel-heading"><div><h2>选择套图模板</h2><p>可勾选多个模板，一起生成整批商品图。</p></div><button class="text" data-action="go-templates">管理模板</button></div>
     ${state.templates.length?`<div class="template-toolbar"><label class="search-control">${icon('search')}<input id="template-search" value="${attr(templateSearch)}" placeholder="搜索模板名称" aria-label="搜索模板名称"></label><span>${state.templates.length} 个模板</span></div>${renderTemplateCards()}<p id="template-no-match" class="field-help" hidden>没有匹配的模板，换个关键词试试。</p><p class="selection-help">勾选加入批次 · 点击缩略图切换预览</p>${template?`<details class="scene-settings" id="scene-settings" ${sceneSettingsOpen?'open':''}><summary>场景与导出顺序 <small>${escapeHTML(templateName(template))} · ${scenesFor(template).length} 个场景</small></summary>${renderScenes(template)}</details>`:''}`:empty('先导入一个 PSD 模板','导入后会自动识别场景和可替换的印花图层。',`<button class="primary" data-action="import" data-edit>${icon('plus')} 选择 PSD 文件</button>`)}</div>
     <div class="step-panel" data-step-panel="2" ${workflowStep!==2?'hidden':''}><div class="panel-heading"><div><h2>选择印花素材</h2><p>选择一个文件夹，点击其中一张查看套图效果。</p></div></div>${pathPicker('input-path','input',input,'选择印花所在文件夹','choose-input')}<div class="import-rules"><label>文件夹组织<select data-setting="input_layout" data-edit>${options([['folders','按子文件夹分款 · 每张印花独立一套'],['flat','每张图片单独一款']],settings.input_layout||'folders')}</select></label><label>排除文件名关键词 · 逗号分隔<input id="input-exclude" value="${attr((settings.input_exclude||[]).join('，'))}" placeholder="留空则读取所有图片" data-edit></label><small>分款模式：款式文件夹 / 印花名称 / 01、02…；根目录的散图仍各自一款。排除规则同时用于列表和批量导出。</small></div><div id="artwork-browser" aria-busy="${artworkLoading}">${renderArtworks()}</div></div>
-    <div class="step-panel" data-step-panel="3" ${workflowStep!==3?'hidden':''}><div class="panel-heading"><div><h2>确认印花效果</h2><p>拖动印花或缩放，当前场景会自动更新；导出前可生成整套预览。</p></div></div>${renderPlacementEditor()}${fitControls()}<div class="placement-tip">完整放入会保留全部图案；铺满可能裁切。手动角度叠加在所选方向上，正值顺时针、负值逆时针。</div></div>
-    <div class="step-panel" data-step-panel="4" ${workflowStep!==4?'hidden':''}><div class="panel-heading"><div><h2>设置批量导出</h2><p>选择保存位置，确认文件夹和图片的命名方式。</p></div></div><label class="field-label" for="output-path">保存到</label>${pathPicker('output-path','output',output,'选择套图结果保存文件夹','choose-output')}<div class="output-hint"><span>每张印花对应一套商品图</span><button data-action="open-output" ${output?'':'disabled'}>打开文件夹 ${icon('arrow')}</button></div>${renderNaming()}${renderAdvanced()}</div>
-  </section><aside class="preview-panel" aria-label="效果预览"><div class="preview-header"><div><h2>效果预览</h2><small>${template?escapeHTML(templateName(template)):'先选择一个模板'}</small></div><span class="badge">${template?scenesFor(template).filter(s=>s.mode!=='skip').length:0} 个场景</span></div><div class="preview-selected"><span class="field-label">当前印花</span><strong title="${attr(source)}">${source?escapeHTML(source.split(/[\\/]/).pop()):'还没有选择印花'}</strong><button data-action="choose-image" data-edit>${icon('image')} 另选图片</button></div>${template&&!selectedIds.has(template.id)?'<p class="preview-scope">当前预览的模板未加入本批导出，请返回第一步勾选。</p>':selectedIds.size>1?'<p class="preview-scope">这里预览当前模板。已选择多个模板，请分别点击模板检查效果。</p>':''}${renderOverviewControls()}<div id="preview-content">${renderPreviews()}</div><div class="preview-tools"><small>点击图片放大 · 左右方向键切换</small><button data-action="preview" class="primary" data-needs-artworks data-edit>生成预览</button></div></aside></div>
+    <div class="step-panel" data-step-panel="3" ${workflowStep!==3?'hidden':''}><div class="panel-heading"><div><h2>确认印花效果</h2><p>全批共用一套参数；切换样本检查不同印花，当前场景自动更新。</p></div></div>${renderSampleNavigator()}${renderPlacementEditor()}${fitControls()}<div class="placement-tip">完整放入会保留全部图案；铺满可能裁切。手动角度叠加在所选方向上，正值顺时针、负值逆时针。</div></div>
+    <div class="step-panel" data-step-panel="4" ${workflowStep!==4?'hidden':''}><div class="panel-heading"><div><h2>设置批量导出</h2><p>选择保存位置，确认文件夹和图片的命名方式。</p></div></div><label class="field-label" for="output-path">保存到</label>${pathPicker('output-path','output',output,'选择套图结果保存文件夹','choose-output')}<div class="output-hint"><span>每张印花对应一套商品图</span><button data-action="open-output" ${output?'':'disabled'}>打开文件夹 ${icon('arrow')}</button></div>${state.templates.filter(t=>selectedIds.has(t.id)&&compatibilityBlocked(t)).map(t=>`<p class="notice warning">${escapeHTML(templateName(t))} 需要处理兼容问题；请返回第一步查看该模板。</p>`).join('')}${renderNaming()}${renderAdvanced()}</div>
+  </section><aside class="preview-panel" aria-label="效果预览"><div class="preview-header"><div><h2>效果预览</h2><small>${template?escapeHTML(templateName(template)):'先选择一个模板'}</small></div><span class="badge">${template?scenesFor(template).filter(s=>s.mode!=='skip').length:0} 个场景</span></div><div class="preview-selected"><span class="field-label">当前印花</span><strong title="${attr(source)}">${source?escapeHTML(source.split(/[\\/]/).pop()):'还没有选择印花'}</strong><button data-action="choose-image" data-edit>${icon('image')} 另选图片</button></div>${template&&!selectedIds.has(template.id)?'<p class="preview-scope">当前预览的模板未加入本批导出，请返回第一步勾选。</p>':selectedIds.size>1?'<p class="preview-scope">这里预览当前模板。已选择多个模板，请分别点击模板检查效果。</p>':''}${renderCompatibility(template)}${renderOverviewControls()}<div id="preview-content">${renderPreviews()}</div><div class="preview-tools"><small>点击图片放大 · 左右方向键切换</small><button data-action="preview" class="primary" data-needs-artworks data-edit>生成整套预览</button></div></aside></div>
   <footer class="workflow-footer"><div class="batch-summary" id="workflow-summary" aria-live="polite"></div><div class="workflow-actions">${workflowStep>1?`<button data-step-target="${workflowStep-1}">上一步</button>`:''}${workflowStep<4?`<button class="primary" data-next-step="${workflowStep+1}">下一步：${['','选择模板','选择印花','确认效果','批量导出'][workflowStep+1]} ${icon('arrow')}</button>`:`<button class="primary export-button" data-action="batch" data-needs-artworks data-edit>${icon('download')} 开始批量导出</button>`}</div></footer></div>`;
 }
 function filterTemplates() {
@@ -231,8 +362,7 @@ function updateWorkflow() {
   if($('#naming-example'))$('#naming-example').textContent=namingExample();
 }
 function previewChanged() {
-  const sceneSettings=currentTemplate()?scenesFor(currentTemplate()).map(({id,mode,targets,artwork_roles})=>({id,mode,targets,artwork_roles:artwork_roles||{}})):[];
-  return !state.task?.preview_settings || Object.entries(settings).some(([key,value])=>!['naming','input_layout','input_exclude'].includes(key)&&JSON.stringify(state.task.preview_settings[key])!==JSON.stringify(value)) || state.task.preview_source!==(source.trim()||input.trim()) || JSON.stringify(state.task.preview_scenes)!==JSON.stringify(sceneSettings);
+  return !displayedPreview||displayedPreview.key!==currentPreviewKey(displayedPreview.allScenes)||displayedPreview.preview_quality!=='full';
 }
 function options(values, selected) { return values.map(([value,label])=>`<option value="${value}" ${value===selected?'selected':''}>${label}</option>`).join(''); }
 function renderScenes(template) {
@@ -246,17 +376,30 @@ function renderOverviewControls(){
   return `<div class="overview-controls"><div class="overview-actions"><button data-action="overview-set" data-edit>整套总览</button><button data-action="overview-toggle" aria-expanded="${overviewOpen}" data-edit>多印花总览 · ${overviewSelected.size} 张</button></div>${overviewOpen?`<div class="overview-options"><p>在“选择印花”勾选图片，或直接添加图片。每张印花只生成下方选定的同一个场景。</p><div class="overview-actions"><button data-action="overview-add" data-edit>添加图片</button><button data-action="overview-page" data-edit>选择当前页</button><button data-action="overview-clear" data-edit>清空</button></div><label>要对比的轮播图<select id="overview-scene" data-edit>${scenes.map((scene,index)=>`<option value="${index}" ${index===overviewScene?'selected':''}>导出 ${String(index+1).padStart(2,'0')} · ${escapeHTML(scene.name)}</option>`).join('')}</select></label><div class="overview-selected-list">${[...overviewSelected].map(path=>`<button data-overview-remove="${attr(path)}" title="${attr(path)}" data-edit>${escapeHTML(path.split(/[\\/]/).slice(-2).join('/'))} ×</button>`).join('')||'<small>尚未选择印花，最多 100 张。</small>'}</div><button class="primary" data-action="overview-many" ${overviewSelected.size?'':'disabled'} data-edit>生成总览图 · ${overviewSelected.size} 张</button></div>`:''}</div>`;
 }
 function renderPreviews() {
-  const previews = state.task?.preview_template_id === selectedId ? state.task.preview || [] : [];
-  const sceneSettings = currentTemplate() ? scenesFor(currentTemplate()).map(({id,mode,targets,artwork_roles})=>({id,mode,targets,artwork_roles:artwork_roles||{}})) : [];
-  const changed = (state.task?.preview_settings && Object.entries(settings).some(([key,value])=>!['naming','input_layout','input_exclude'].includes(key)&&JSON.stringify(state.task.preview_settings[key])!==JSON.stringify(value))) || (state.task?.preview_source && state.task.preview_source !== (source.trim()||input.trim())) || (state.task?.preview_scenes && JSON.stringify(state.task.preview_scenes)!==JSON.stringify(sceneSettings));
+  const previews = displayedPreview?.preview||[];
   const partial=previews.length>0&&previews.length<editorScenes().length;
-  const placement = [...new Set((state.task?.preview_fit||[]).map(info=>info.reason))].join('；');
+  const placement = [...new Set((displayedPreview?.preview_fit||[]).map(info=>info.reason))].join('；');
   const overview=state.task?.overview;
   const sheet=overview?.template_id===selectedId?`<div class="overview-result"><div><strong>${escapeHTML(overview.title)}</strong><button data-action="overview-save" data-edit>保存总览图</button></div><button class="overview-image" data-image="${attr(overview.url)}" data-title="${attr(overview.title)}"><img src="${attr(overview.url)}" alt="${attr(overview.title)}"></button><small>共 ${overview.count} 张 · 修改选择或参数后请重新生成</small></div>`:'';
-  return sheet + (previews.length ? `${partial?'<p class="preview-scope">当前仅预览选定场景。点击“生成预览”检查整套图片。</p>':''}${changed?'<div class="notice warning">预览参数与当前设置不同，请重新生成预览。</div>':''}${placement?`<p class="field-help preview-placement">本次预览：${escapeHTML(placement)}</p>`:''}<div class="preview-grid">${previews.map(p=>`<button class="preview-tile" data-image="${attr(p.url)}" data-title="${attr(p.name)}"><img src="${attr(p.url)}" alt="${attr(p.name)}" loading="lazy"><span>${escapeHTML(p.name)}</span></button>`).join('')}</div>` : `<div class="preview-empty"><span class="preview-symbol" aria-hidden="true">${icon('image')}</span><strong>在这里检查套图效果</strong><p>选好模板和印花后，点击“生成预览”。</p></div>`);
+  return sheet+`<div id="preview-status" class="preview-live-status" role="status" aria-live="polite"></div>`+(previews.length ? `${partial?'<p class="preview-scope">当前选定场景 · 可生成整套预览检查其他场景。</p>':''}${placement?`<p class="field-help preview-placement">适配方式：${escapeHTML(placement)}</p>`:''}<div class="preview-grid ${previews.length===1?'single-preview':''}" data-preview-source="${attr(displayedPreview.preview_source)}" data-preview-quality="${attr(displayedPreview.preview_quality)}" data-preview-task="${attr(displayedPreview.task_id)}" data-preview-scene="${displayedPreview.allScenes?'all':previews[0].scene_index}" data-preview-current="false">${previews.map(p=>`<button class="preview-tile" data-image="${attr(p.url)}" data-title="${attr(p.name)}"><img src="${attr(p.url)}" alt="${attr(p.name)}"><span>${escapeHTML(p.name)}</span></button>`).join('')}</div>` : `<div class="preview-empty"><span class="preview-symbol" aria-hidden="true">${icon('image')}</span><strong>在这里检查套图效果</strong><p>进入“确认效果”后自动加载，调整时同步更新。</p></div>`);
+}
+function updatePreviewContent(){
+  const container=$('#preview-content');if(!container)return;
+  const top=container.scrollTop;container.innerHTML=renderPreviews();container.scrollTop=top;paintPreviewStatus();
+}
+function paintPreviewStatus(){
+  const element=$('#preview-status');if(!element)return;
+  const matches=displayedPreview&&displayedPreview.key===currentPreviewKey(displayedPreview.allScenes);
+  const current=!!matches&&(!editorDesired||displayedPreview.key===editorDesired.key&&displayedPreview.preview_quality===editorDesired.quality);
+  const updating=!!editorFlight||editorPending;
+  const oldName=displayedPreview?.preview_source?.split(/[\\/]/).pop()||'';
+  const following=displayedPreview?.preview_quality==='draft'&&displayedPreview.baseKey===editorKey()&&editorDesired?.quality==='draft';
+  element.classList.toggle('updating',updating||!!displayedPreview&&!current);
+  element.textContent=current?(displayedPreview.preview_quality==='draft'?'快速预览 · 停止调整后自动精修':'完整预览 · 与当前设置一致'):displayedPreview?(following?'正在跟随调整 · 显示最近一次快速预览':matches&&displayedPreview.preview_quality==='draft'?'正在精修 · 暂显示快速预览':`${updating?'更新中':'设置已改变'} · 暂显示上一结果：${oldName}`):updating?'正在准备当前场景…':'调整参数会自动更新当前场景';
+  const grid=$('.preview-grid');if(grid)grid.dataset.previewCurrent=String(current);
 }
 function renderTemplates() {
-  return heading('模板管理','将 PSD 作为模板导入，逐场景确认印花位置。', '<button class="primary" data-action="import" data-edit>＋ 导入 PSD</button>') + (state.templates.length ? `<div class="catalog-grid">${state.templates.map(t=>`<article class="card catalog-tile"><div class="catalog-cover">${t.scenes?.find(s=>s.thumbnail)?`<img src="${attr(t.scenes.find(s=>s.thumbnail).thumbnail)}" alt="${attr(t.name)} 场景缩略图" loading="lazy">`:'PSD 模板'}</div><h3>${escapeHTML(t.name)}</h3><p title="${attr(t.path)}">${escapeHTML(t.path)}</p><footer><span class="badge">${t.scenes?.length||0} 个场景</span><div class="actions"><button data-open-template="${attr(t.id)}">配置</button><button class="text error-text" data-remove-template="${attr(t.id)}" data-edit>移除</button></div></footer>${t.warnings?.length?`<p class="field-help error-text">有 ${t.warnings.length} 条扫描提示，打开配置查看。</p>`:''}</article>`).join('')}</div>` : `<section class="card">${empty('导入第一个模板','支持一次选择多个 PSD 文件，导入后会自动扫描场景和候选印花。','<button class="primary" data-action="import" data-edit>选择 PSD 文件</button>')}</section>`);
+  return heading('模板管理','将 PSD 作为模板导入，逐场景确认印花位置。', '<button class="primary" data-action="import" data-edit>＋ 导入 PSD</button>') + (state.templates.length ? `<div class="catalog-grid">${state.templates.map(t=>`<article class="card catalog-tile"><div class="catalog-cover">${t.scenes?.find(s=>s.thumbnail)?`<img src="${attr(t.scenes.find(s=>s.thumbnail).thumbnail)}" alt="${attr(t.name)} 场景缩略图" loading="lazy">`:'PSD 模板'}</div><h3>${escapeHTML(t.name)}</h3><p title="${attr(t.path)}">${escapeHTML(t.path)}</p><footer><span class="badge">${t.scenes?.length||0} 个场景 · ${t.compatibility?.status==='blocked'?'暂不能套图':t.compatibility?.status==='ready'?'检查通过':t.compatibility?.status==='review'?'需核对效果':'待检查'}</span><div class="actions"><button data-open-template="${attr(t.id)}">配置</button><button class="text error-text" data-remove-template="${attr(t.id)}" data-edit>移除</button></div></footer>${t.warnings?.length?`<p class="field-help error-text">有 ${t.warnings.length} 条扫描提示，打开配置查看。</p>`:''}</article>`).join('')}</div>` : `<section class="card">${empty('导入第一个模板','支持一次选择多个 PSD 文件，导入后会自动扫描场景和候选印花。','<button class="primary" data-action="import" data-edit>选择 PSD 文件</button>')}</section>`);
 }
 function historyPath(h) { return h.path || h.manifest || h.manifest_path || ''; }
 function renderHistory() {
@@ -272,6 +415,7 @@ function statusLabel(status) { return {idle:'准备就绪',running:'处理中',p
 function renderTask() {
   const container = $('#task-panel'); if (!container) return;
   const task = state.task || {status:'idle'}, active = activeStatuses.includes(task.status);
+  if(editorEnabled&&['editor','preview'].includes(task.kind)){container.innerHTML='';lastTaskSignature='';return;}
   const signature = JSON.stringify(task);
   if(signature===lastTaskSignature && container.innerHTML) return;
   lastTaskSignature=signature;
@@ -285,8 +429,11 @@ function renderTask() {
   container.innerHTML = `<section class="card task-card" aria-label="任务进度"><header><div class="task-status"><h2>${task.kind==='scan'?'扫描模板':task.kind==='preview'?'生成预览':'当前任务'}</h2><span class="badge ${task.status==='failed'?'failed':task.status==='done'?'success':task.status==='running'?'uploading':''}">${statusLabel(task.status)}</span></div><small>${total?`${Math.round(progress/total*100)}%`:active?'请稍候':''}</small></header><div class="task-body"><p class="task-message ${task.error?'error-text':''}" role="status">${escapeHTML(task.error||task.message||statusLabel(task.status))}</p><div class="task-meter"><progress max="${total||1}" ${total||!active?`value="${total?Math.min(progress,total):task.status==='done'?1:0}"`:''} aria-label="任务进度"></progress><small>${progress} / ${total||'—'}</small></div><div class="task-footer"><small>${task.status==='paused'?'任务已暂停，点击继续可接着处理。':task.status==='stopping'?'正在结束当前处理，请等待。':active?'处理期间，模板和导出参数暂时锁定。':'任务记录保留在本次会话中。'}</small><div class="actions">${task.status==='running'&&task.kind==='batch'?'<button data-control="pause">暂停</button>':''}${task.status==='paused'?'<button data-control="resume" class="primary">继续</button>':''}${['running','paused'].includes(task.status)?'<button data-control="stop" class="danger-outline">停止</button>':''}</div></div>${task.results?.length?`<details class="results-detail"><summary>查看处理结果 · ${task.results.length} 项</summary><ul>${task.results.slice(-100).map(r=>`<li>${escapeHTML(typeof r==='string'?r:r.message||r.path||r.output||r.name||JSON.stringify(r))}</li>`).join('')}</ul></details>`:''}</div></section>`;
 }
 function updateLocks() {
-  $('#placement-stage')?.classList.toggle('locked',blocked());
-  document.querySelectorAll('[data-edit]').forEach(element => { element.disabled = blocked() || (element.dataset.action==='overview-many'&&!overviewSelected.size) || (element.dataset.action==='overview-set'&&!source) || (element.hasAttribute('data-dimension') && settings.width===0 && settings.height===0) || (element.hasAttribute('data-needs-artworks') && artworkLoading) || (element.dataset.action==='artworks-prev' && (artworkLoading || artworkOffset===0)) || (element.dataset.action==='artworks-next' && (artworkLoading || artworkOffset+40>=artworkTotal)) || (element.hasAttribute('data-resume') && !historyPath(state.history[Number(element.dataset.resume)]||{})); });
+  $('#placement-stage')?.classList.toggle('locked',editorBlocked());
+  document.querySelectorAll('[data-edit]').forEach(element => {
+    const live=element.closest('[data-step-panel="3"]')||element.hasAttribute('data-artwork');
+    element.disabled = (live?editorBlocked():blocked()) || (['preview','overview-set','overview-many'].includes(element.dataset.action)&&compatibilityBlocked(currentTemplate())) || (element.dataset.action==='batch'&&state.templates.some(t=>selectedIds.has(t.id)&&compatibilityBlocked(t))) || (element.dataset.action==='overview-many'&&!overviewSelected.size) || (element.dataset.action==='overview-set'&&!source) || (element.hasAttribute('data-dimension') && settings.width===0 && settings.height===0) || (element.hasAttribute('data-needs-artworks') && artworkLoading) || (element.dataset.action==='artworks-prev' && (artworkLoading || artworkOffset===0)) || (element.dataset.action==='artworks-next' && (artworkLoading || artworkOffset+40>=artworkTotal)) || ((element.hasAttribute('data-sample-artwork')||element.hasAttribute('data-sample-step'))&&artworkLoading) || (element.hasAttribute('data-sample-step')&&(artworkTotal===0||Number(element.dataset.sampleStep)<0&&sampleTargetIndex<=0||Number(element.dataset.sampleStep)>0&&sampleTargetIndex>=artworkTotal-1)) || (element.hasAttribute('data-resume') && !historyPath(state.history[Number(element.dataset.resume)]||{}));
+  });
   document.querySelectorAll('[data-control]').forEach(element => { element.disabled = busyRequest; });
   updateWorkflow();
 }
@@ -352,10 +499,11 @@ function savePreferences() {
     catch(error) { notify(`设置未能保存：${error.message}`,true); }
   },500);
 }
-async function loadArtworks(offset=0, resetSource=false) {
+async function loadArtworks(offset=0, resetSource=false, preservePages=false) {
   const token=++artworkRequest, folder=input.trim();
   artworkOffset=offset; artworkFolder=folder; artworkError=''; artworkLoading=!!folder;
   artworkFiles=[]; artworkExcluded=[]; if(offset===0)artworkTotal=0;
+  if(!preservePages||resetSource){artworkPages.clear();artworkIndices.clear();sampleIndex=-1;sampleTargetIndex=-1;sampleRequest++;sampleLoading=false;}
   if(resetSource){source='';overviewSelected.clear();}
   const paint=()=>{if($('#artwork-browser')) { $('#artwork-browser').innerHTML=renderArtworks(); $('#artwork-browser').setAttribute('aria-busy',String(artworkLoading)); } updateLocks();};
   paint();
@@ -364,13 +512,15 @@ async function loadArtworks(offset=0, resetSource=false) {
     const data=await request('/api/artworks',{folder,offset,limit:40,exclude:settings.input_exclude});
     if(token!==artworkRequest || input.trim()!==folder)return;
     artworkFiles=data.files||[]; artworkExcluded=data.excluded||[]; artworkTotal=data.total||0; artworkOffset=data.offset??offset;
+    artworkPages.set(artworkOffset,artworkFiles);artworkFiles.forEach((file,i)=>artworkIndices.set(file.path,artworkOffset+i));
     if(!source && artworkFiles.length)source=artworkFiles[0].path;
+    sampleIndex=artworkIndices.get(source)??-1;sampleTargetIndex=sampleIndex;
   } catch(error) { if(token!==artworkRequest)return; artworkError=error.message; }
-  finally { if(token===artworkRequest) { artworkLoading=false; renderPage(); } }
+  finally { if(token===artworkRequest) { artworkLoading=false;paint();updateSampleSelection();observeEditor(); } }
 }
 async function handleAction(name) {
-  if(name==='load-editor'){if(blocked())return;editorEnabled=true;editorAttemptKey='';editorBaseKey='';editorPending=true;renderPage();scheduleEditor(0);return;}
-  if(name==='placement-center'||name==='placement-reset'){if(blocked())return;settings.offset_x=0;settings.offset_y=0;if(name==='placement-reset')settings.scale=100;paintEditor();savePreferences();queueEditorPreview();return;}
+  if(name==='load-editor'){if(editorBlocked())return;editorEnabled=true;editorAttemptKey='';editorBaseKey='';queueEditorPreview(false);return;}
+  if(name==='placement-center'||name==='placement-reset'){if(editorBlocked())return;settings.offset_x=0;settings.offset_y=0;if(name==='placement-reset')settings.scale=100;paintEditor();savePreferences();queueEditorPreview(false);return;}
   if (name==='go-templates') { page='templates'; renderShell(); return; }
   if (name==='open-output') {
     try { if(!output.trim())throw new Error('请先选择保存文件夹。'); clearTimeout(preferenceTimer); await request('/api/preferences',{input:input.trim(),output:output.trim(),settings,limit:Number(limit)}); if(window.desktop?.openOutput)await window.desktop.openOutput(output.trim());else await request('/api/open-output',{path:output.trim()}); }
@@ -393,17 +543,16 @@ async function handleAction(name) {
     if (name==='import') { const paths=await choose('psd'); if(paths.length) await action('/api/scan',{paths},'开始扫描 PSD 模板'); }
     if (name==='refresh-template') { const template=currentTemplate(); if(template) await action('/api/scan',{paths:[template.path]},'开始重新扫描模板'); }
     if (name==='choose-input'||name==='choose-output') { const paths=await choose('folder'); if(paths.length) { if(name==='choose-input') { input=paths[0]; renderPage(); await loadArtworks(0,true); } else { output=paths[0]; renderPage(); } savePreferences(); } }
-    if (name==='choose-image') { const paths=await choose('image'); if(paths.length) { source=paths[0]; renderPage(); } }
+    if (name==='choose-image') { const paths=await choose('image'); if(paths.length)selectSample(paths[0]); }
     if (name==='reload-artworks') await loadArtworks(artworkOffset);
-    if (name==='artworks-prev') await loadArtworks(Math.max(0,artworkOffset-40));
-    if (name==='artworks-next') await loadArtworks(artworkOffset+40);
+    if (name==='artworks-prev') await loadArtworks(Math.max(0,artworkOffset-40),false,true);
+    if (name==='artworks-next') await loadArtworks(artworkOffset+40,false,true);
     if (name==='save-template') { busyRequest=true; updateLocks(); await saveTemplate(); await refresh(); renderPage(); notify('场景设置已保存'); }
     if (name==='preview') {
       validateSettings(); if(!selectedId) throw new Error('请先导入并选择模板。');
       if(!source.trim()&&!input.trim()) throw new Error('请选择一张预览印花，或填写印花文件夹。');
       if(dirty.has(selectedId)) throw new Error('请先保存当前模板的场景设置。');
-      editorPending=false;clearTimeout(editorTimer);
-      await action('/api/preview',{id:selectedId,source:source.trim()||input.trim(),settings},'正在生成预览');
+      editorEnabled=true;queueEditorPreview(false,true);
     }
     if (name==='batch') {
       validateSettings(); if(!selectedIds.size) throw new Error('请至少勾选一个套图模板。');
@@ -423,13 +572,15 @@ app.addEventListener('click', async (event)=> {
     if(button.dataset.nextStep && workflowStep===2 && !source && !artworkTotal){notify('请先选择印花文件夹或预览图片。',true);return;}
     workflowStep=Number(button.dataset.stepTarget||button.dataset.nextStep);renderPage();document.querySelector('.workflow-step.current')?.focus();return;
   }
-  if(button.dataset.fitChoice){settings.fit=button.dataset.fitChoice;renderPage();savePreferences();return;}
+  if(button.dataset.fitChoice){settings.fit=button.dataset.fitChoice;document.querySelectorAll('[data-setting="fit"]').forEach(field=>field.value=settings.fit);updateWorkflow();savePreferences();queueEditorPreview(false);return;}
   if(button.dataset.page) { page=button.dataset.page; renderShell(); }
   else if(button.dataset.action) await handleAction(button.dataset.action);
   else if(button.dataset.control) await action('/api/control',{action:button.dataset.control});
   else if(button.dataset.configureTemplate) { selectedId=button.dataset.configureTemplate; renderPage(); }
   else if(button.dataset.overviewRemove){overviewSelected.delete(button.dataset.overviewRemove);renderPage();}
-  else if(button.dataset.artwork) { source=button.dataset.artwork; renderPage(); }
+  else if(button.dataset.artwork) selectSample(button.dataset.artwork);
+  else if(button.dataset.sampleArtwork) selectSample(button.dataset.sampleArtwork,Number(button.dataset.sampleIndex));
+  else if(button.dataset.sampleStep) await stepSample(Number(button.dataset.sampleStep));
   else if(button.dataset.openTemplate) { selectedId=button.dataset.openTemplate; workflowStep=1; sceneSettingsOpen=true; page='workbench'; renderShell(); }
   else if(button.dataset.removeTemplate) {
     const template=state.templates.find(t=>t.id===button.dataset.removeTemplate);
@@ -448,15 +599,16 @@ app.addEventListener('input',(event)=> {
   if(field.id==='template-search'){templateSearch=field.value;filterTemplates();return;}
   if(field.dataset.naming) { settings.naming[field.dataset.naming]=field.type==='number'?Number(field.value):field.value; if($('#naming-example'))$('#naming-example').textContent=namingExample(); savePreferences(); }
   if(field.dataset.model) { const value=field.type==='number'?Number(field.value):field.value; if(field.dataset.model==='input')input=value; if(field.dataset.model==='output')output=value; if(field.dataset.model==='source')source=value; if(field.dataset.model==='limit')limit=value; }
-  if(field.dataset.model && $('#preview-content'))$('#preview-content').innerHTML=renderPreviews();
-  if(field.dataset.setting) { settings[field.dataset.setting]=field.type==='checkbox'?field.checked:(field.type==='number'||field.type==='range')?Number(field.value):field.value; if(field.dataset.setting==='brightness')$('#artwork-brightness-value').textContent=field.value; if($('#preview-content'))$('#preview-content').innerHTML=renderPreviews(); }
+  if(field.dataset.model)paintPreviewStatus();
+  if(field.dataset.setting) { settings[field.dataset.setting]=field.type==='checkbox'?field.checked:(field.type==='number'||field.type==='range')?Number(field.value):field.value; if(field.dataset.setting==='brightness')$('#artwork-brightness-value').textContent=field.value; if(!['input_layout','input_exclude'].includes(field.dataset.setting))queueEditorPreview(true);paintPreviewStatus(); }
   if(field.dataset.setting || field.dataset.model==='limit')savePreferences();
   updateWorkflow(); observeEditor();
 });
 app.addEventListener('change',(event)=> {
   const field=event.target;
-  if(field.dataset.placement){field.value=settings[field.dataset.placement];return;}
+  if(field.dataset.placement){field.value=settings[field.dataset.placement];queueEditorPreview(false);return;}
   if(field.id==='editor-scene'){editorSceneIndex=Number(field.value);observeEditor();return;}
+  if(field.dataset.setting&&!['input_layout','input_exclude'].includes(field.dataset.setting))queueEditorPreview(false);
   if(field.dataset.namingMode) {
     const key=field.dataset.namingMode,custom=field.value==='custom';
     if(key==='folder')customFolderRule=custom;else customImageRule=custom;
@@ -514,29 +666,48 @@ $('#next-image').addEventListener('click',()=>showImage(imageIndex+1));
 $('#image-dialog').addEventListener('keydown',event=>{
   if(['ArrowLeft','ArrowRight'].includes(event.key)&&!event.target.matches('input,textarea,select')){event.preventDefault();showImage(imageIndex+(event.key==='ArrowLeft'?-1:1));}
 });
+function acceptTaskSnapshot(next){
+  const snapshot=Number(next.snapshot_id);
+  if(Number.isFinite(snapshot)&&snapshot<latestSnapshot)return false;
+  if(Number.isFinite(snapshot))latestSnapshot=snapshot;
+  state.task=next.task||{status:'idle'};return true;
+}
+function scheduleTaskPoll(delay=150){
+  if(taskPollTimer||taskPolling)return;
+  taskPollTimer=setTimeout(async()=>{
+    taskPollTimer=null;taskPolling=true;const recoveryVersion=editorRecoveryVersion;let failed=false;
+    try{
+      const next=await request('/api/task');
+      const accepted=acceptTaskSnapshot(next);if(recoveryVersion===editorRecoveryVersion)editorRecovering=false;
+      if(accepted){receiveEditor();renderTask();}updateLocks();paintPreviewStatus();observeEditor();
+    }catch(error){failed=true;if(editorFlight)notify(`预览状态读取失败，正在重试：${error.message}`,true);}
+    finally{taskPolling=false;if(editorFlight||editorRecovering||activeStatuses.includes(state.task?.status)&&['editor','preview'].includes(state.task?.kind))scheduleTaskPoll(failed?1000:150);}
+  },delay);
+}
 async function refresh() {
   try {
     const next=await request('/api/state');
     const oldStatus=state.task?.status, oldOverview=state.task?.overview?.url, wasConnected=connected;
-    state={...next,templates:next.templates||[],task:next.task||{status:'idle'},cache:next.cache||{},history:next.history||[]};
+    if(!acceptTaskSnapshot(next))return;
+    state={...next,templates:next.templates||[],task:state.task,cache:next.cache||{},history:next.history||[]};
     connected=true;
     const firstLoad=!initialized;
     if(firstLoad) { const pref=state.preferences||{}; input=pref.input||'';output=pref.output||'';settings={...settings,...pref.settings,fit_policy:2};limit=pref.limit||0; if(settings.width&&settings.height)customSize={width:settings.width,height:settings.height}; initialized=true; }
     const signature=JSON.stringify([state.templates,state.history,state.cache]);
-    const previews=JSON.stringify([state.task.preview,state.task.preview_template_id,state.task.preview_settings,state.task.overview]);
+    const previews=JSON.stringify([state.task.overview]);
     const available=new Set(state.templates.map(t=>t.id));
     selectedIds=new Set([...selectedIds].filter(id=>available.has(id)));
     if(!available.has(selectedId)) { selectedId=state.templates[0]?.id||'';if(selectedId)selectedIds.add(selectedId); }
     if(!$('#page-content')||!wasConnected) { renderShell(); catalogSignature=signature; }
     else {
       renderTask();
-      const editing=editorDrag||draggedScene||document.activeElement?.matches('input,select,summary');
+      const editing=editorDrag||editorRangePointer!==null||editorFlight||draggedScene||document.activeElement?.matches('input,select,summary');
       if(signature!==catalogSignature&&!editing) { renderPage(); catalogSignature=signature; }
-      if(previews!==previewSignature&&$('#preview-content')){$('#preview-content').innerHTML=renderPreviews();updateWorkflow();}
+      if(previews!==previewSignature&&$('#preview-content')){updatePreviewContent();updateWorkflow();}
       if(state.task.kind==='overview'&&state.task.status==='done'&&state.task.overview?.url!==oldOverview){overviewOpen=false;renderPage();}
       if(oldStatus!==state.task.status)updateLocks();
     }
-    receiveEditor(); observeEditor();
+    receiveEditor(); observeEditor();paintPreviewStatus();
     previewSignature=previews;
     $('#connection').innerHTML='';
     if(firstLoad && input.trim())loadArtworks();
@@ -548,7 +719,8 @@ async function refresh() {
     updateLocks();
   }
 }
-async function poll() { await refresh(); setTimeout(poll, activeStatuses.includes(state.task?.status)?1000:3000); }
+async function poll() { await refresh(); setTimeout(poll, activeStatuses.includes(state.task?.status)&&!['editor','preview'].includes(state.task?.kind)?1000:5000); }
 poll();
 
 window.addEventListener('workbench-update-lock',updateLocks);
+window.addEventListener('resize',revealSampleThumbnail);

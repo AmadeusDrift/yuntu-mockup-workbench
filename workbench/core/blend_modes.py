@@ -1,4 +1,4 @@
-"""Normal, multiply, screen, soft-light and darken straight-alpha compositing.
+"""Bounded-memory, straight-alpha compositing in encoded RGB.
 
 Masks, fill opacity and layer opacity must already be folded into source alpha.
 RGB multiplication is performed in the supplied encoded colour space, matching
@@ -6,6 +6,10 @@ the engine's existing sRGB-pixel compositing convention.
 """
 import numpy as np
 from PIL import Image, ImageChops
+
+SUPPORTED_MODES = frozenset(('normal', 'multiply', 'screen', 'soft_light', 'darken',
+    'lighten', 'overlay', 'hard_light', 'difference', 'exclusion',
+    'linear_dodge', 'linear_burn', 'color_dodge', 'color_burn'))
 
 
 def composite_rgba(backdrop, source, mode='normal', chunk_rows=128):
@@ -15,7 +19,7 @@ def composite_rgba(backdrop, source, mode='normal', chunk_rows=128):
     multiply backdrop uses Pillow's C operations; other alpha combinations use
     the general blend-and-source-over equation in bounded NumPy row chunks.
     """
-    if mode not in ('normal', 'multiply', 'screen', 'soft_light', 'darken'):
+    if mode not in SUPPORTED_MODES:
         raise ValueError('Unsupported blend mode: ' + str(mode))
     if backdrop.size != source.size:
         raise ValueError('Backdrop and source dimensions differ')
@@ -65,10 +69,24 @@ def composite_rgba(backdrop, source, mode='normal', chunk_rows=128):
                 blended = np.minimum(cb, cs)
             elif mode == 'screen':
                 blended = cb + cs - cb * cs
-            else:
+            elif mode == 'soft_light':
                 d = np.where(cb <= 0.25, ((16.0 * cb - 12.0) * cb + 4.0) * cb, np.sqrt(cb))
                 blended = np.where(cs <= 0.5, cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb),
                                    cb + (2.0 * cs - 1.0) * (d - cb))
+            elif mode == 'lighten': blended = np.maximum(cb, cs)
+            elif mode in ('overlay', 'hard_light'):
+                condition = cb if mode == 'overlay' else cs
+                blended = np.where(condition <= .5, 2*cb*cs, 1-2*(1-cb)*(1-cs))
+            elif mode == 'difference': blended = np.abs(cb-cs)
+            elif mode == 'exclusion': blended = cb+cs-2*cb*cs
+            elif mode == 'linear_dodge': blended = np.minimum(1, cb+cs)
+            elif mode == 'linear_burn': blended = np.maximum(0, cb+cs-1)
+            elif mode == 'color_dodge':
+                blended = np.where(cb == 0, 0, np.minimum(1, np.divide(cb, 1-cs,
+                    out=np.ones_like(cb), where=cs < 1)))
+            elif mode == 'color_burn':
+                blended = np.where(cb == 1, 1, 1-np.minimum(1, np.divide(1-cb, cs,
+                    out=np.ones_like(cb), where=cs > 0)))
             premultiplied = cb * ab * (1.0 - a) + cs * a * (1.0 - ab) + blended * a * ab
         rgb = np.divide(premultiplied, alpha, out=np.zeros_like(premultiplied), where=alpha > 0)
         result[top:bottom, :, :3] = np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)

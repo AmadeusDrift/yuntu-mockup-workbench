@@ -1,0 +1,17 @@
+{
+  "status": "PASS",
+  "version": "0.3.8",
+  "previous_version": "0.3.7",
+  "installer_bytes": 195119051,
+  "installer_sha256": "02732d678ccba4c0665c575c377a31c13bad9ec642ec92a3874c6e0d54ea07bc",
+  "portable_files": 3226,
+  "clean_files": 3226,
+  "upgrade_files": 3226,
+  "source_hashes": 70,
+  "clean_extraction": true,
+  "upgrade_preserves_settings": true,
+  "backup_verified": true,
+  "user_extra_file_preserved": true,
+  "upgraded_desktop_started": true,
+  "run": "C:\\Users\\12079\\OneDrive\\Desktop\\套图工具可视化\\.analysis-temp\\release-038-20261110-170920"
+}

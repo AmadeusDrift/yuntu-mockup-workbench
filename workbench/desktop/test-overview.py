@@ -22,14 +22,17 @@ cache=data/'cache'/cache_key(template);cache.mkdir(parents=True)
 ops=[dict(kind='slot',native_size=[20,20],quad=[[0,0],[20,0],[20,20],[0,20]],opacity=255)]
 (cache/'template.json').write_text(json.dumps(dict(version=4,workbench=True,scenes=[dict(name=str(i+1),width=20,height=20,slots=1,ops=ops) for i in range(5)])),encoding='utf-8')
 (cache/'cache-meta.json').write_text(json.dumps(dict(name='fixture',last_used=time.time())),encoding='utf-8')
-target=root/'release/套图工作台-v0.3.5';env=dict(os.environ);env.pop('ELECTRON_RUN_AS_NODE',None)
+version=json.loads((root/'workbench/desktop/package.json').read_text(encoding='utf-8'))['version']
+target=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/('release/套图工作台-v'+version)
+env=dict(os.environ);env.pop('ELECTRON_RUN_AS_NODE',None)
 log=(run/'desktop.log').open('wb');process=subprocess.Popen([str(target/'套图工作台.exe'),'--data-dir='+str(data),'--remote-debugging-port=9342'],env=env,stdout=log,stderr=log)
 try:
  for _ in range(150):
   if (data/'desktop-status.json').exists():break
   if process.poll() is not None:raise RuntimeError('Desktop exited')
   time.sleep(.2)
- subprocess.run([r'C:/Users/12079/AppData/Local/Programs/node-v24.21.0-win-x64/node.exe',str(root/'workbench/desktop/test-overview.cjs'),str(data),str(run)],check=True,timeout=90)
+ checked=subprocess.run([r'C:/Users/12079/AppData/Local/Programs/node-v24.21.0-win-x64/node.exe',str(root/'workbench/desktop/test-overview.cjs'),str(data),str(run)],timeout=90,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,encoding='utf-8')
+ (run/'node-test.log').write_text(checked.stdout,encoding='utf-8');print(checked.stdout,flush=True);checked.check_returncode()
  result=json.loads((run/'ui-result.json').read_text(encoding='utf-8'))
  for product,colors in [('款式A',[(255,0,0),(0,128,0),(0,0,255),(128,0,128)]),('款式B',[(255,165,0),(0,255,255)])]:
   for i,color in enumerate(colors):
@@ -38,7 +41,7 @@ try:
     with Image.open(file) as image:assert image.getpixel((10,10))[:3]==color
  assert len(list(Path(result['output']).rglob('*.png')))==30
  with Image.open(result['saved']) as sheet:assert sheet.width>500 and sheet.height>300
- (root/'release/overview-verification.json').write_text(json.dumps(dict(status='PASS',version='0.3.5',run=str(run),selected_artworks=2,selected_scene='3',set_scenes=5,exported_images=30,arbitrary_group_sizes=[4,2],fixture='synthetic cached renderer'),ensure_ascii=False,indent=2),encoding='utf-8')
+ (run/'verification.json').write_text(json.dumps(dict(status='PASS',version=version,run=str(run),selected_artworks=2,selected_scene='3',set_scenes=5,exported_images=30,arbitrary_group_sizes=[4,2],fixture='synthetic cached renderer'),ensure_ascii=False,indent=2),encoding='utf-8')
  print('PASS: independent generic groups and overview export')
 finally:
  installer_helper.close_applications(target,data,30);process.wait(timeout=15);log.close()

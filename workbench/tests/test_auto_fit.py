@@ -86,7 +86,7 @@ class BrowserAndPreferencesTests(unittest.TestCase):
             (root/'preferences.json').write_text(json.dumps(old))
             self.assertEqual(Service(root).preferences['settings']['width'],800)
 
-    def test_preview_explains_unique_nested_native_sizes_and_batch_creates_output(self):
+    def test_preview_explains_unique_nested_native_sizes_and_batch_defers_output_until_checked(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); source=root/'source';source.mkdir();app=Service(root/'data')
             Image.new('RGB',(100,100),'red').save(source/'art.png')
@@ -107,7 +107,7 @@ class BrowserAndPreferencesTests(unittest.TestCase):
             output=root/'new'/'output'
             with patch.object(app,'start',return_value={'ok':True}):
                 app.batch(['a'],source,output,settings())
-            self.assertTrue(output.is_dir())
+            self.assertFalse(output.exists(), 'Output must wait for all template compatibility checks')
             with self.assertRaises(ValueError):app.batch(['a'],source,'',settings())
 
     def test_defaults_and_preferences_preserve_custom_settings(self):

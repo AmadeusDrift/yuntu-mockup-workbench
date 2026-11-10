@@ -39,7 +39,10 @@ try:
         if (data / 'desktop-status.json').exists(): break
         if process.poll() is not None: raise RuntimeError('Desktop exited')
         time.sleep(.2)
-    subprocess.run([str(Path.home() / 'AppData/Local/Programs/node-v24.21.0-win-x64/node.exe'), str(root / 'workbench/desktop/test-placement.cjs'), str(data), str(run)], check=True, timeout=180)
+    checked = subprocess.run([str(Path.home() / 'AppData/Local/Programs/node-v24.21.0-win-x64/node.exe'), str(root / 'workbench/desktop/test-placement.cjs'), str(data), str(run)], timeout=180, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8')
+    (run / 'node-test.log').write_text(checked.stdout, encoding='utf-8')
+    print(checked.stdout, flush=True)
+    checked.check_returncode()
     result = json.loads((run / 'ui-result.json').read_text(encoding='utf-8'))
     report = dict(status='PASS', version=version, run=str(run), fixture='synthetic cached renderer', **result)
     (run / 'verification.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')

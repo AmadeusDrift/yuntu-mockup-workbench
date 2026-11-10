@@ -115,15 +115,16 @@ class Compiler:
         from psd_tools.constants import BlendMode, Tag
         if layer.kind=='artboard':
             raise ValueError(label+'：暂不支持画板文档，请在副本中整理为普通场景组')
-        if layer.blend_mode not in (BlendMode.NORMAL, BlendMode.PASS_THROUGH, BlendMode.MULTIPLY,
-                                    BlendMode.SCREEN, BlendMode.SOFT_LIGHT, BlendMode.DARKEN):
+        from blend_modes import SUPPORTED_MODES
+        if layer.blend_mode != BlendMode.PASS_THROUGH and layer.blend_mode.name.lower() not in SUPPORTED_MODES:
             raise ValueError(label + '：暂不支持混合模式 ' + str(layer.blend_mode))
         if layer.fill_opacity != 255:
             raise ValueError(label + '：暂不支持非 100% 的填充不透明度')
         from blend_if import parse_blend_if
         try:blend_if=parse_blend_if(layer)
         except ValueError as exc:raise ValueError(label+'：'+str(exc)) from exc
-        if blend_if and (layer.has_effects() or layer.kind=='brightnesscontrast' or
+        from psd_adjustments import SUPPORTED_KINDS
+        if blend_if and (layer.has_effects() or layer.kind in SUPPORTED_KINDS or layer.kind=='brightnesscontrast' or
                          (layer.is_group() and layer.blend_mode==BlendMode.PASS_THROUGH)):
             raise ValueError(label+'：混合颜色带暂不能与图层样式、调整层或穿透组组合使用')
         if Tag.KNOCKOUT_SETTING in layer.tagged_blocks:
@@ -136,8 +137,7 @@ class Compiler:
     @staticmethod
     def blend_name(layer):
         from psd_tools.constants import BlendMode
-        return {BlendMode.MULTIPLY:'multiply', BlendMode.SCREEN:'screen',
-                BlendMode.SOFT_LIGHT:'soft_light', BlendMode.DARKEN:'darken'}.get(layer.blend_mode, 'normal')
+        return 'normal' if layer.blend_mode == BlendMode.PASS_THROUGH else layer.blend_mode.name.lower()
 
     @staticmethod
     def check_clip_base(layer, label, blend_if):
@@ -262,7 +262,7 @@ class Compiler:
         return {'dx':-math.cos(angle)*distance, 'dy':math.sin(angle)*distance,
                 'blur':float(e.size), 'spread':spread, 'opacity':float(e.opacity), 'color':rgb}
 
-    def slot(self, layer, size, label):
+    def slot(self, layer, size, label, validate_only=False):
         from psd_tools.constants import Tag
         if layer.kind != 'smartobject':
             raise ValueError(label + '：产品图层必须是智能对象')
@@ -307,7 +307,7 @@ class Compiler:
         coefficients(quad,native)
         mask=self.mask(layer,size,label)
         slot={'kind':'slot','native_size':native,'quad':quad,'opacity':layer.opacity,'blend':self.blend_name(layer),
-              'mask':self.asset(mask) if mask else None,'shadow':self.shadow(layer,label)}
+              'mask':self.asset(mask) if mask and not validate_only else None,'shadow':self.shadow(layer,label)}
         role=getattr(self,'artwork_roles',{}).get(id(layer))
         if role:slot['artwork_role']=role
         if b'quiltWarp' in data:
@@ -316,8 +316,9 @@ class Compiler:
             self.progress(label+'：正在建立网格映射…')
             try:
                 spec=parse_quilt(data,size)
-                mapping=build_uv_map(spec,self.folder/filename,
-                    progress=lambda done,total:self.progress(label+f'：网格 {done}/{total}'))
+                if not validate_only:
+                    mapping=build_uv_map(spec,self.folder/filename,
+                        progress=lambda done,total:self.progress(label+f'：网格 {done}/{total}'))
             except ValueError as exc:raise ValueError(label+'：该网格变形暂无法处理：'+str(exc)) from exc
             slot['warp']=filename
             self.warnings.append('网格变形使用缓存近似映射；请先核对图案位置、弯曲边缘和细节。')
@@ -325,6 +326,7 @@ class Compiler:
 
     def compile_layers(self, layers, size, label, force_visible=None):
         from psd_tools.constants import BlendMode
+        from psd_adjustments import SUPPORTED_KINDS, compile_adjustment
         ops=[]
         static=Image.new('RGBA',size)
         clip_stack=None
@@ -350,7 +352,20 @@ class Compiler:
             else:
                 clip_stack=None;clip_hidden=False
             blend_if=self.check_layer(layer,here)
-            if layer.kind=='brightnesscontrast':
+            if layer.kind in SUPPORTED_KINDS:
+                if layer.blend_mode!=BlendMode.NORMAL or layer.has_effects():
+                    raise ValueError(here+'：调整层目前只支持普通模式且无图层样式')
+                try:spec=compile_adjustment(layer)
+                except ValueError as exc:raise ValueError(here+'：'+str(exc)) from exc
+                mask=self.mask(layer,size,here)
+                op={'kind':'adjustment','adjustment':layer.kind,'spec':spec,'opacity':layer.opacity,
+                    'mask':self.asset(mask) if mask is not None else None}
+                flush()
+                if layer.clipping:clip_stack['ops'].append(op)
+                else:ops.append(op)
+                if layer.kind in ('gradientmap','curves','huesaturation','exposure'):
+                    self.warnings.append('渐变、曲线、色相/饱和度及曝光按 RGB 8 位近似合成，请先核对颜色与高光。')
+            elif layer.kind=='brightnesscontrast':
                 if layer.blend_mode!=BlendMode.NORMAL or layer.has_effects():
                     raise ValueError(here+'：亮度/对比度调整层目前只支持普通模式且无图层样式')
                 from tone_adjustments import brightness_contrast_lut
@@ -421,7 +436,7 @@ class Compiler:
                     flush()
                     clip_stack={'kind':'clipstack','base':self.asset(full),'ops':[],'shadow':shadow,'blend':self.blend_name(layer)}
                     ops.append(clip_stack)
-                elif layer.blend_mode in (BlendMode.MULTIPLY,BlendMode.SCREEN,BlendMode.SOFT_LIGHT,BlendMode.DARKEN) or blend_if:
+                elif layer.blend_mode not in (BlendMode.NORMAL, BlendMode.PASS_THROUGH) or blend_if:
                     flush()
                     if shadow:
                         ink=add_shadow(Image.new('RGBA',size),full,shadow)
@@ -735,15 +750,20 @@ def prepare_placement_artwork(artwork,size,mode,fit_policy=2,orientation='origin
         rotation=angle,mode=mode,preserve_alpha=preserve_alpha)
 
 
-def fit_placed_artwork(artwork,size,mode,placement,fit_policy=2,orientation='original',rotation=0,preserve_alpha=False):
+def fit_placed_artwork(artwork,size,mode,placement,fit_policy=2,orientation='original',rotation=0,preserve_alpha=False,reference_size=None):
     scale,dx,dy=placement_values(placement);scale/=100
-    image,layout=prepare_placement_artwork(artwork,size,mode,fit_policy,orientation,rotation)
-    a,b,c,d,x,y=layout['affine'];tw,th=size
+    reference_size=reference_size or size
+    image,layout=prepare_placement_artwork(artwork,reference_size,mode,fit_policy,orientation,rotation)
+    a,b,c,d,x,y=layout['affine'];tw,th=reference_size
     a*=scale;b*=scale;c*=scale;d*=scale
     x=tw/2+(x-tw/2)*scale+tw*dx/100
     y=th/2+(y-th/2)*scale+th*dy/100
     det=a*d-b*c
     matrix=(d/det,-c/det,(c*y-d*x)/det,-b/det,a/det,(b*x-a*y)/det)
+    if tuple(reference_size)!=tuple(size):
+        # Sample the same full-size layout onto a smaller grid without allocating that plane.
+        rx,ry=tw/size[0],th/size[1]
+        matrix=(matrix[0]*rx,matrix[1]*ry,matrix[2],matrix[3]*rx,matrix[4]*ry,matrix[5])
     # Bound allocations to the input image and final native plane, even for
     # extreme panoramas or 300% placement. Low-pass before affine downsampling.
     ia,ib,_,id_,ie,_=matrix
@@ -791,6 +811,10 @@ class Renderer:
                     self._static_layers[id(op)]=(apply_opacity(layer,op.get('opacity',255)),shadow_image(layer,shadow))
         for scene in self.data['scenes']:walk(scene['ops'])
 
+    def scaled_preview(self, max_edge=720):
+        from preview_renderer import scaled_renderer
+        return scaled_renderer(self, max_edge)
+
     def render_scene(self,scene,artwork,mode,prepared,fit_policy=2,orientation='original',rotation=0,placement=None):
         size=(scene['width'],scene['height'])
         placed=placement_values(placement)!=(100,0,0)
@@ -803,8 +827,11 @@ class Renderer:
                     from tone_adjustments import apply_lut_rgba
                     mask=self.assets[op['mask']] if op.get('mask') else None
                     if mask is not None and region:mask=mask.crop(region)
-                    canvas=apply_lut_rgba(canvas,op['lut'],
-                        mask=mask,opacity=op.get('opacity',255))
+                    if op.get('spec'):
+                        from psd_adjustments import apply_adjustment_rgba
+                        canvas=apply_adjustment_rgba(canvas,op['spec'],mask=mask,opacity=op.get('opacity',255))
+                    else:
+                        canvas=apply_lut_rgba(canvas,op['lut'],mask=mask,opacity=op.get('opacity',255))
                     continue
                 elif op['kind']=='static':
                     layer=self._static_layers[id(op)][0]
@@ -836,7 +863,15 @@ class Renderer:
                     slot_artwork=artwork[role] if isinstance(artwork,dict) else artwork
                     slot_prepared=prepared.setdefault(('role',role),{}) if isinstance(artwork,dict) else prepared
                     stage_size=tuple(op['native_size'])
-                    if placed:
+                    if op.get('preview_native_size'):
+                        original_size=tuple(op['preview_native_size'])
+                        preview_key=('preview',original_size,stage_size,placement_values(placement),mode,fit_policy,orientation,rotation)
+                        if preview_key not in slot_prepared:
+                            slot_prepared[preview_key]=fit_placed_artwork(slot_artwork,stage_size,mode,placement,
+                                fit_policy,orientation,rotation,preserve_alpha=bool(self.data.get('workbench')),
+                                reference_size=original_size)
+                        stage_size=preview_key
+                    elif placed:
                         placement_key=('placement',stage_size,placement_values(placement),mode,fit_policy,orientation,rotation)
                         if placement_key not in slot_prepared:
                             slot_prepared[placement_key]=fit_placed_artwork(slot_artwork,stage_size,mode,placement,
