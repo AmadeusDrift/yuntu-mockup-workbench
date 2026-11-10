@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "old_client": "0.3.7",
+  "published_version": "0.3.8",
+  "signature_verified": true,
+  "download_verified": true,
+  "size": 195119051,
+  "sha256": "02732d678ccba4c0665c575c377a31c13bad9ec642ec92a3874c6e0d54ea07bc",
+  "url": "https://taotu.htcerp.app/updates/stable/Taotu-Workbench-Setup-0.3.8-x64.exe"
+}

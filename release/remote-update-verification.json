@@ -1,10 +1,9 @@
 {
-  "version": "0.3.7",
-  "url": "https://taotu.htcerp.app/updates/stable/Taotu-Workbench-Setup-0.3.7-x64.exe",
-  "sha256": "f79a2f9025e0a2204ad5ee3ca45932d889c22350a4036534beac73f53f34afa2",
-  "size": 195099216,
+  "version": "0.3.8",
+  "url": "https://taotu.htcerp.app/updates/stable/Taotu-Workbench-Setup-0.3.8-x64.exe",
+  "sha256": "02732d678ccba4c0665c575c377a31c13bad9ec642ec92a3874c6e0d54ea07bc",
+  "size": 195119051,
   "signature_verified": true,
   "remote_file_verified": true,
-  "published": true,
-  "desktop_updater_live_download_verified": true
+  "published": true
 }

@@ -29,3 +29,7 @@
 ## 安装与发布记录
 
 安装包、清洁解包、0.3.7 升级、设置保留及文件清单核验记录保存在 `release/compatibility-release-verification.json`。签名稳定清单、公开下载大小和 SHA-256 复核结果保存在 `release/remote-update-verification.json`。在线渠道仍使用现有 `/updates/stable/latest.json`。
+
+2026-11-10 发行完成：安装包 195,119,051 字节，SHA-256 `02732d678ccba4c0665c575c377a31c13bad9ec642ec92a3874c6e0d54ea07bc`。便携版、清洁解包和隔离升级均逐一核验 3226 个文件，70 项构建源码哈希一致；0.3.7 配置原样保留且备份可核对，新程序启动通过。最终布局复测：`.analysis-temp/layout-desktop-20261110-171230/layout-result.json`。源码提交 `25b4c2e2edf4a0fcf5e481e261f08ac5b36f3940` 已逐 blob 核验，未改动其他远程文件。
+
+已使用原 0.3.7 更新模块和原公钥，从正式地址发现并完整下载 0.3.8，安装包校验和签名均通过；未安装到真实用户目录。记录见 `release/update-client-0.3.8-verification.json`。

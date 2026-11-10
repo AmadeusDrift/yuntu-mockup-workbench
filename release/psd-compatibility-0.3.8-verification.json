@@ -1,0 +1,115 @@
+{
+  "status": "PASS",
+  "version": "0.3.8",
+  "source_sha256": "4bd9d86d5b39124de3ece9dafebefee840914ecfd84271b8c5a374c3390973b3",
+  "source_unchanged": true,
+  "scenes": 7,
+  "slots": [
+    1,
+    1,
+    1,
+    3,
+    2,
+    1,
+    1
+  ],
+  "import_seconds": 9.782207499956712,
+  "compatibility": {
+    "version": 1,
+    "key": "f52e4f81f78b3b091e376ce7a4ef12b6d3399376a3962c655e9e6f194496d0a1",
+    "status": "review",
+    "issues": [],
+    "warnings": [
+      "渐变、曲线、色相/饱和度及曝光按 RGB 8 位近似合成，请先核对颜色与高光。"
+    ],
+    "features": {
+      "group:pass_through": 8,
+      "pixel:normal": 4,
+      "smartobject:normal": 17,
+      "pixel:multiply": 2,
+      "gradientmap:normal": 7,
+      "smartobject:soft_light": 10
+    }
+  },
+  "live_adjustment_ops": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "exact_preview_export_pairs": [
+    "A/01.png",
+    "A/02.png",
+    "A/03.png",
+    "A/04.png",
+    "A/05.png",
+    "A/06.png",
+    "A/07.png",
+    "B/01.png",
+    "B/02.png",
+    "B/03.png",
+    "B/04.png",
+    "B/05.png",
+    "B/06.png",
+    "B/07.png"
+  ],
+  "timing": {
+    "full": {
+      "first": 0.32549650012515485,
+      "warm_median": 0.2785455499542877
+    },
+    "draft": {
+      "first": 0.42916200007312,
+      "warm_median": 0.07902395003475249
+    }
+  },
+  "warm_psd_reads": 0,
+  "warm_full_hashes": 0,
+  "photoshop": [
+    {
+      "scene": "1",
+      "mae": 0.09941817232172306,
+      "p99": 1.0,
+      "maximum": 7.0
+    },
+    {
+      "scene": "2",
+      "mae": 0.0365965539725298,
+      "p99": 1.0,
+      "maximum": 7.0
+    },
+    {
+      "scene": "3",
+      "mae": 0.019544475223145584,
+      "p99": 1.0,
+      "maximum": 7.0
+    },
+    {
+      "scene": "4",
+      "mae": 0.1120234494699365,
+      "p99": 1.0,
+      "maximum": 7.0
+    },
+    {
+      "scene": "5",
+      "mae": 0.06460496003432291,
+      "p99": 1.0,
+      "maximum": 7.0
+    },
+    {
+      "scene": "6",
+      "mae": 0.023725672743552372,
+      "p99": 1.0,
+      "maximum": 7.0
+    },
+    {
+      "scene": "7",
+      "mae": 0.010034662074450541,
+      "p99": 0.0,
+      "maximum": 6.0
+    }
+  ]
+}

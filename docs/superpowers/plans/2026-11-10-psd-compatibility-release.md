@@ -25,10 +25,10 @@ Owner: isolated implementer; files `workbench/core/psd_adjustments.py`, `workben
 
 ## Task 2 — renderer integration and static reuse
 
-Owner: root; files `workbench/core/engine.py`, `workbench/core/psd_blend.py` if needed, `workbench/core/preview_renderer.py`, renderer tests.
+Owner: root; files `workbench/core/engine.py`, `workbench/core/blend_modes.py`, `workbench/core/preview_renderer.py`, renderer tests.
 
 - [x] Add failing integration cases containing an adjustment above a static clipping base and above a dynamic artwork slot.
-- [x] Compile supported adjustment kinds to `{kind:'adjustment', adjustment:<serialized-spec>, mask:<asset>, opacity:<int>}` (preserve legacy brightness LUT operations).
+- [x] Compile supported adjustment kinds to `{kind:'adjustment', adjustment:<kind>, spec:<serialized-spec>, mask:<asset>, opacity:<int>}` (preserve legacy brightness LUT operations).
 - [x] Render the new operation using `apply_adjustment_rgba`; permit bounded-region optimization only for pointwise operations.
 - [x] Fold purely static adjustment/clipping groups into immutable cached pixels without flattening artwork-dependent operations.
 - [x] Extend common supported separable blend modes using the existing alpha-compositing rules and independent expected-color tests. Continue reporting complex unsupported styles/filters explicitly.
@@ -39,7 +39,7 @@ Owner: root; files `workbench/core/engine.py`, `workbench/core/psd_blend.py` if 
 Owner: root; files `workbench/compatibility.py`, `workbench/catalog.py`, `workbench/service.py`, `workbench/web/app.js`, `workbench/web/studio.css`, tests.
 
 - [x] Add tests showing two unsupported features in one active scene are both reported, hidden/skip scenes do not falsely block, and known-incompatible jobs fail before task startup/output creation.
-- [x] Introduce a versioned structured report `{version, issues:[{scene_id, layer, code, message}], checked_scenes}`. Keep approximation warnings separate; reuse old catalog data without assuming old warnings mean current support.
+- [x] Introduce a versioned structured report `{version, key, status, issues:[{scene, scene_name, layer, message}], warnings, features}`. Keep approximation warnings separate; reuse old catalog data without assuming old warnings mean current support.
 - [x] Audit active render paths for adjustments, blend modes, fills, filters, group effects, clipping and masks. Use the actual compiler for supported-variant validation.
 - [x] Recheck existing imported templates with obsolete reports; apply selected scene modes/targets. Job validation remains authoritative even when clients are old.
 - [x] Show usable/blocked status and concrete scene/layer reasons; disable only affected preview/export operations, keeping configuration/reimport/skip controls available. Retain whole-batch global settings and the current live-preview queue.
@@ -55,6 +55,8 @@ Owner: root; files `workbench/compatibility.py`, `workbench/catalog.py`, `workbe
 
 - [x] Finalize 0.3.8 release notes, support matrix and verification records for the combined changes.
 - [x] Build portable and installer, verify manifest file hashes, extract/test the installer in a clean isolated profile, and verify upgrade preservation from 0.3.7.
-- [ ] Publish source to the private repository using an expected parent SHA, retaining unrelated remote content; include verification records but no PSDs, artwork, tokens or signing keys.
-- [ ] Use the existing publisher to upload the installer, verify remote bytes/SHA-256, then publish the signed stable manifest. Verify public latest.json signature/version and installer digest.
-- [ ] Record deployed version and provide the published version and user update entry point.
+- [x] Publish source to the private repository using an expected parent SHA, retaining unrelated remote content; include verification records but no PSDs, artwork, tokens or signing keys.
+- [x] Use the existing publisher to upload the installer, verify remote bytes/SHA-256, then publish the signed stable manifest. Verify public latest.json signature/version and installer digest.
+- [x] Record deployed version and provide the published version and user update entry point.
+
+Completed 2026-11-10: 0.3.8 stable published; public installer SHA-256 and Ed25519 signature verified, and the original 0.3.7 updater independently discovered/downloaded/verified the release. See workbench/updates/verification-0.3.8.md and release/*0.3.8*verification.json.

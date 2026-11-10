@@ -1,0 +1,10 @@
+{
+  "version": "0.3.8",
+  "repository": "AmadeusDrift/yuntu-mockup-workbench",
+  "parent": "41e68d3980a0b699c10cb3cf0f3fb1d7b96a05f1",
+  "source_commit": "25b4c2e2edf4a0fcf5e481e261f08ac5b36f3940",
+  "tree": "de8d568e26ece2ca5bc93f3e4ebe5c01cf1084d6",
+  "verified_blobs": 42,
+  "unrelated_remote_files_preserved": true,
+  "local_unpublished_changes_preserved": true
+}
